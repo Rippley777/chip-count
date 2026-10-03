@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/chip-core", "src-tauri", "crates/chip-server"]
+default-members = ["crates/chip-core"]
+resolver = "2"

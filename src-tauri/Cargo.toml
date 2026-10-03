@@ -1,0 +1,27 @@
+[package]
+name = "chip-count"
+version = "0.1.0"
+description = "Know where every token went."
+authors = ["Rippley Labs"]
+edition = "2021"
+rust-version = "1.95"
+
+[lib]
+name = "chip_count"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chip-core = { path = "../crates/chip-core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+notify = "8"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-notification = "2"

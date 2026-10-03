@@ -1,0 +1,16 @@
+node_modules/
+dist/
+target/
+*.tsbuildinfo
+.DS_Store
+*.db
+*.db-shm
+*.db-wal
+test-results/
+playwright-report/
+artifacts/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+src-tauri/gen/
+src-tauri/icons/icon.iconset/
