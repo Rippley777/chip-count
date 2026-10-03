@@ -142,7 +142,17 @@ const money = (value: number, precision = 2) =>
 const usageCost = (u: Usage, precision = 2) =>
   u.unpriced_tokens > 0 && u.unpriced_tokens === u.total
     ? 'Unpriced'
-    : money(u.cost, precision) + (u.unpriced_tokens ? '*' : '');
+    : (u.inferred_price_tokens ? '≈' : '') +
+      money(u.cost, precision) +
+      (u.unpriced_tokens ? '*' : '');
+const costCoverage = (u: Usage, complete: string) =>
+  u.unpriced_tokens
+    ? compact(u.unpriced_tokens) +
+      ' tokens unpriced' +
+      (u.inferred_price_tokens ? ' · auto-review estimates' : '')
+    : u.inferred_price_tokens
+      ? 'Includes auto-review estimates · model inferred'
+      : complete;
 const category = (
   u: Usage,
   key: 'input' | 'output' | 'cache_read' | 'cache_write' | 'reasoning',
@@ -1198,8 +1208,8 @@ export default function App() {
                       : '—'
                   }
                   note={
-                    snapshot?.today.unpriced_tokens
-                      ? compact(snapshot.today.unpriced_tokens) + ' tokens unpriced'
+                    snapshot
+                      ? costCoverage(snapshot.today, 'API equivalent · not a bill')
                       : 'API equivalent · not a bill'
                   }
                   accent
@@ -1954,13 +1964,8 @@ function SessionList({
                       </span>
                     )}
                     {columns.cost && (
-                      <b title="API-equivalent estimated cost">
-                        {s.usage.unpriced_tokens === s.usage.total && s.usage.total > 0
-                          ? 'Unpriced'
-                          : money(s.usage.cost)}
-                        {s.usage.unpriced_tokens > 0 && s.usage.unpriced_tokens < s.usage.total && (
-                          <sup>*</sup>
-                        )}
+                      <b title={costCoverage(s.usage, 'API-equivalent estimated cost')}>
+                        {usageCost(s.usage)}
                       </b>
                     )}
                   </span>
@@ -2188,11 +2193,7 @@ function Inspector({
                     <strong className="amber-text">
                       {u.unpriced_tokens === u.total && u.total > 0 ? 'Unpriced' : usageCost(u)}
                     </strong>
-                    <small>
-                      {u.unpriced_tokens
-                        ? compact(u.unpriced_tokens) + ' tokens unpriced'
-                        : 'Known model rates'}
-                    </small>
+                    <small>{costCoverage(u, 'Known model rates')}</small>
                   </div>
                 </div>
                 <div className="inspector-section">
@@ -3027,11 +3028,7 @@ function Analytics({
           icon={Wallet}
           label="API-equivalent cost"
           value={u.unpriced_tokens === u.total && u.total > 0 ? 'Unpriced' : usageCost(u)}
-          note={
-            u.unpriced_tokens
-              ? compact(u.unpriced_tokens) + ' tokens unpriced'
-              : 'Known prices for observed events'
-          }
+          note={costCoverage(u, 'Known prices for observed events')}
           accent
         />
         <Metric
@@ -3364,11 +3361,7 @@ function Projects({
                 </div>
                 <div>
                   <span>API ESTIMATE</span>
-                  <strong>
-                    {p.usage.unpriced_tokens === p.usage.total && p.usage.total > 0
-                      ? 'Unpriced'
-                      : money(p.usage.cost)}
-                  </strong>
+                  <strong>{usageCost(p.usage)}</strong>
                 </div>
                 <Sparkline
                   values={p.sparkline}
@@ -3742,11 +3735,7 @@ function Compare({
                   </div>
                   <div>
                     <dt>Est. cost</dt>
-                    <dd>
-                      {item.usage.unpriced_tokens === item.usage.total && item.usage.total
-                        ? 'Unpriced'
-                        : money(item.usage.cost)}
-                    </dd>
+                    <dd>{usageCost(item.usage)}</dd>
                   </div>
                   <div>
                     <dt>Unpriced tokens</dt>
@@ -3766,7 +3755,11 @@ function Compare({
                   item.usage.unpriced_tokens < item.usage.total &&
                   base.usage.unpriced_tokens < base.usage.total && (
                     <p className="small-note">
-                      Known cost difference: {money(item.usage.cost - base.usage.cost)} (
+                      Estimated cost difference:{' '}
+                      {item.usage.inferred_price_tokens || base.usage.inferred_price_tokens
+                        ? '≈'
+                        : ''}
+                      {money(item.usage.cost - base.usage.cost)} (
                       {difference(item.usage.cost, base.usage.cost)}).
                     </p>
                   )}
@@ -4870,8 +4863,12 @@ function SettingsPage({
                       <td>
                         <strong>{p.model}</strong>
                         <small>
-                          {p.override ? 'Local override' : 'Bundled snapshot'} · {p.version} ·{' '}
-                          {date(p.retrieved_at)}
+                          {p.override
+                            ? 'Local override'
+                            : p.inferred
+                              ? 'Auto-review estimate · model inferred'
+                              : 'Bundled snapshot'}{' '}
+                          · {p.version} · {date(p.retrieved_at)}
                         </small>
                         <span className="price-source">{p.source}</span>
                       </td>

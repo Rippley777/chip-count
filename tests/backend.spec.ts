@@ -160,3 +160,77 @@ test('filesystem updates reconcile complete lines, and monitoring pause/resume w
     await rm(folder, { recursive: true, force: true });
   }
 });
+
+test('auto-review costs display inferred model pricing in the dashboard and inspector', async ({
+  page,
+  request,
+}) => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const folder = await mkdtemp(join(tmpdir(), 'chip-count-review-test-'));
+  const path = join(folder, 'review.jsonl');
+  const timestamp = new Date().toISOString();
+  const real = async (command: string, args: unknown = {}) => {
+    const response = await request.post('/api/dispatch', { data: { command, args, demo: false } });
+    expect(response.ok(), await response.text()).toBe(true);
+    return response.json();
+  };
+  let sourceId: string | undefined;
+  try {
+    await writeFile(
+      path,
+      [
+        { type: 'session_meta', timestamp, payload: { id: folder, cwd: folder } },
+        { type: 'turn_context', timestamp, payload: { model: 'codex-auto-review' } },
+        {
+          type: 'event_msg',
+          timestamp,
+          payload: {
+            type: 'token_count',
+            info: {
+              total_token_usage: {
+                input_tokens: 100000,
+                cached_input_tokens: 50000,
+                output_tokens: 1000,
+                reasoning_output_tokens: 500,
+                total_tokens: 101000,
+              },
+            },
+          },
+        },
+      ]
+        .map((record) => JSON.stringify(record) + '\n')
+        .join(''),
+    );
+    await real('source_save', {
+      provider: 'codex',
+      label: 'Temporary auto-review fixture',
+      path,
+      enabled: true,
+    });
+    const snapshot = await real('snapshot', { filter: { project: folder } });
+    sourceId = snapshot.sources.find((s: any) => s.label === 'Temporary auto-review fixture')?.id;
+    expect(snapshot.totals.inferred_price_tokens).toBe(101000);
+    expect(snapshot.totals.unpriced_tokens).toBe(0);
+    await page.addInitScript(
+      ({ project, selected }) => {
+        localStorage.setItem('chip-count:demo', 'false');
+        localStorage.setItem('chip-count:page', '"Live"');
+        localStorage.setItem('chip-count:filter', JSON.stringify({ project }));
+        localStorage.setItem('chip-count:selected', JSON.stringify(selected));
+        localStorage.setItem('chip-count:inspector-tab', '"Overview"');
+      },
+      { project: folder, selected: snapshot.sessions[0].id },
+    );
+    await page.goto('/');
+    await expect(page.locator('.metrics-strip').first()).toContainText('≈$0.01');
+    await expect(page.locator('.metrics-strip').first()).toContainText('auto-review estimates');
+    await expect(page.locator('.inspector-stats')).toContainText('≈$0.01');
+    await expect(page.locator('.inspector-stats')).toContainText('model inferred');
+    await expect(page.locator('.session-row-main').first()).toContainText('≈$0.01');
+  } finally {
+    if (sourceId) await real('source_remove', { id: sourceId });
+    await rm(folder, { recursive: true, force: true });
+  }
+});

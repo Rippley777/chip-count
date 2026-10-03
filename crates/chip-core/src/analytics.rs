@@ -868,6 +868,7 @@ impl Engine {
                     "filters_json",
                     "pricing_history_json",
                     "unknown_categories_json",
+                    "inferred_price_tokens",
                 ];
                 let mut csv = header.join(",") + "\r\n";
                 for e in data["events"].as_array().unwrap() {
@@ -891,6 +892,7 @@ impl Engine {
                         data["filters"].clone(),
                         data["pricing_history"].clone(),
                         e["usage"]["unknown_fields"].clone(),
+                        e["usage"]["inferred_price_tokens"].clone(),
                     ];
                     csv.push_str(&vals.iter().map(csv_cell).collect::<Vec<_>>().join(","));
                     csv.push_str("\r\n");

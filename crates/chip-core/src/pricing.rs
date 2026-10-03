@@ -18,6 +18,10 @@ impl Engine {
             ("gpt-6-luna", 0.1, 0.5, 0.01, 0.125),
             ("gpt-5.6-sol", 4., 20., 0.4, 5.),
             ("gpt-5.6-terra", 2., 12., 0.2, 2.5),
+            ("gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25),
+            // OpenAI's current Codex rate card identifies the auto-review backend as 5.6 Luna.
+            // Keep the source model intact and expose this mapping as inferred pricing.
+            ("codex-auto-review", 0.2, 1.2, 0.02, 0.),
         ];
         // Install new models and recover their previously missing estimates atomically.
         // Already priced events and local rate overrides keep their original versions.
@@ -33,13 +37,17 @@ impl Engine {
                     output,
                     cache_read,
                     cache_write,
-                    version: if modern_openai(model) {
+                    version: if model == "codex-auto-review" {
+                        "inferred-2026-10-03-auto-review-luna"
+                    } else if modern_openai(model) {
                         "bundled-2026-10-03-openai-v2"
                     } else {
                         "bundled-2026-10-03"
                     }
                     .into(),
-                    source: if model.starts_with("claude") {
+                    source: if model == "codex-auto-review" {
+                        "Auto review → GPT-5.6 Luna (documented mapping): https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing"
+                    } else if model.starts_with("claude") {
                         "https://platform.claude.com/docs/en/about-claude/pricing"
                     } else {
                         "https://developers.openai.com/api/docs/pricing"
@@ -47,6 +55,7 @@ impl Engine {
                     .into(),
                     retrieved_at: "2026-10-03T00:00:00Z".into(),
                     overridden: false,
+                    inferred: model == "codex-auto-review",
                 };
                 self.store_price(&price)?;
                 self.recover_unpriced_model(model)?;
@@ -103,6 +112,7 @@ impl Engine {
             source: "Local override · USD per million tokens".into(),
             retrieved_at: now(),
             overridden: true,
+            inferred: required(v, "model")? == "codex-auto-review",
         })
     }
     pub(crate) fn apply_price(&self, e: &mut Event) -> Result<()> {
@@ -121,9 +131,15 @@ impl Engine {
         e.usage.cost = 0.;
         e.usage.events = if e.scope == "session-own" { 1 } else { 0 };
         e.usage.unpriced_tokens = 0;
+        e.usage.inferred_price_tokens = 0;
         if let Some(price) = price {
             let p: Price = serde_json::from_value(price)?;
-            let long_context = modern_openai(&p.model)
+            let pricing_model = if p.inferred && p.model == "codex-auto-review" {
+                "gpt-5.6-luna"
+            } else {
+                &p.model
+            };
+            let long_context = modern_openai(pricing_model)
                 && e.usage
                     .input
                     .saturating_add(e.usage.cache_read)
@@ -133,7 +149,7 @@ impl Engine {
             if e.warnings
                 .iter()
                 .any(|w| w.starts_with("Pricing unavailable:")
-                    && !(modern_openai(&p.model) && w == "Pricing unavailable: long-context tier requires a verified rate override"))
+                    && !(modern_openai(pricing_model) && w == "Pricing unavailable: long-context tier requires a verified rate override"))
                 && !p.overridden
             {
                 e.usage.unpriced_tokens = e.usage.total;
@@ -141,7 +157,7 @@ impl Engine {
                 return Ok(());
             }
             e.warnings.retain(|w| w != "Pricing basis: long-context request (>272K input); 2x input/cache and 1.5x output rates");
-            if modern_openai(&p.model) && !p.overridden {
+            if modern_openai(pricing_model) && !p.overridden {
                 e.warnings.retain(|w| {
                     w != "Pricing unavailable: long-context tier requires a verified rate override"
                 });
@@ -165,6 +181,17 @@ impl Engine {
                 + calc(e.usage.cache_write, p.cache_write * input_multiplier);
             e.usage.nano = ((n + 500_000) / 1_000_000).min(i64::MAX as i128) as i64;
             e.usage.cost = e.usage.nano as f64 / 1e9;
+            if p.inferred {
+                e.usage.inferred_price_tokens = e.usage.total;
+                let basis = if p.overridden {
+                    "Pricing basis: auto-review uses local custom rates; actual backend model is not recorded"
+                } else {
+                    "Pricing basis: auto-review model inferred as GPT-5.6 Luna from OpenAI's 2026-10-03 rate card; historical routing is not recorded"
+                };
+                e.warnings
+                    .retain(|w| !w.starts_with("Pricing basis: auto-review"));
+                e.warnings.push(basis.into());
+            }
             e.pricing_version = Some(p.version);
         } else {
             e.usage.unpriced_tokens = e.usage.total;
@@ -209,6 +236,7 @@ fn modern_openai(model: &str) -> bool {
             | "gpt-6-luna"
             | "gpt-5.6-sol"
             | "gpt-5.6-terra"
+            | "gpt-5.6-luna"
     )
 }
 fn pricing_alias(model: &str) -> &str {
@@ -301,7 +329,7 @@ mod tests {
     #[test]
     fn unknown_models_and_unverified_service_tiers_remain_explicitly_unpriced() {
         let engine = Engine::demo().unwrap();
-        let mut e = event("codex-auto-review", Usage::tokens(100, 10, 0, 0, 0));
+        let mut e = event("unlisted-review-model", Usage::tokens(100, 10, 0, 0, 0));
         engine.apply_price(&mut e).unwrap();
         assert_eq!(e.usage.unpriced_tokens, 110);
         e.model = "gpt-6-astra".into();
@@ -313,5 +341,41 @@ mod tests {
         engine.apply_price(&mut e).unwrap();
         assert_eq!(e.usage.nano, 0);
         assert_eq!(e.usage.unpriced_tokens, 110);
+    }
+
+    #[test]
+    fn auto_review_uses_documented_luna_rates_and_preserves_inferred_provenance() {
+        let engine = Engine::demo().unwrap();
+        let mut e = event(
+            "codex-auto-review",
+            Usage::tokens(1000, 1000, 1000, 1000, 500),
+        );
+        engine.apply_price(&mut e).unwrap();
+        assert_eq!(e.model, "codex-auto-review");
+        assert_eq!(e.usage.nano, 1_420_000);
+        assert_eq!(e.usage.inferred_price_tokens, 4000);
+        assert_eq!(e.usage.unpriced_tokens, 0);
+        assert!(e
+            .warnings
+            .iter()
+            .any(|w| w.contains("model inferred as GPT-5.6 Luna")));
+        let mut combined = Usage::default();
+        combined.add(&e.usage);
+        combined.add(&Usage::tokens(100, 0, 0, 0, 0));
+        assert_eq!(combined.total, 4100);
+        assert_eq!(combined.inferred_price_tokens, 4000);
+        engine.save_price(&json!({"model":"codex-auto-review","input":1,"output":2,"cache_read":0.1,"cache_write":0})).unwrap();
+        e.pricing_version = None;
+        engine.apply_price(&mut e).unwrap();
+        assert_eq!(e.usage.nano, 3_100_000);
+        assert_eq!(e.usage.inferred_price_tokens, 4000);
+        assert_eq!(
+            e.warnings
+                .iter()
+                .filter(|w| w.starts_with("Pricing basis: auto-review"))
+                .count(),
+            1
+        );
+        assert!(e.warnings.iter().any(|w| w.contains("local custom rates")));
     }
 }

@@ -37,6 +37,7 @@ export interface Usage {
   total: number;
   cost: number;
   unpriced_tokens: number;
+  inferred_price_tokens?: number;
   events: number;
 }
 export interface Session {
@@ -127,6 +128,7 @@ export interface Price {
   source: string;
   retrieved_at: string;
   override: boolean;
+  inferred?: boolean;
 }
 export interface Settings {
   theme: 'dark' | 'light' | 'system';

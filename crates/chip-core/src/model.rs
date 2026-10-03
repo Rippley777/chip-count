@@ -37,6 +37,8 @@ pub struct Usage {
     pub total: u64,
     pub cost: f64,
     pub unpriced_tokens: u64,
+    #[serde(default)]
+    pub inferred_price_tokens: u64,
     pub events: u64,
     #[serde(default)]
     pub unknown_fields: Vec<String>,
@@ -73,6 +75,9 @@ impl Usage {
         self.nano = self.nano.saturating_add(b.nano);
         self.cost = self.nano as f64 / 1e9;
         self.unpriced_tokens = self.unpriced_tokens.saturating_add(b.unpriced_tokens);
+        self.inferred_price_tokens = self
+            .inferred_price_tokens
+            .saturating_add(b.inferred_price_tokens);
         self.events = self.events.saturating_add(b.events);
     }
 }
@@ -232,6 +237,8 @@ pub struct Price {
     pub retrieved_at: String,
     #[serde(rename = "override")]
     pub overridden: bool,
+    #[serde(default)]
+    pub inferred: bool,
 }
 pub fn settings_default() -> Value {
     json!({"theme":"dark","density":"comfortable","timezone":"UTC","inactivity_minutes":10,"close_to_tray":true,"launch_at_login":false,"notifications":false,"retention_days":365,"redact_paths":false,"redact_labels":false,"monthly_subscription":null})

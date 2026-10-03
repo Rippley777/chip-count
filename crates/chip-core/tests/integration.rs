@@ -325,7 +325,7 @@ fn new_price_catalog_recovers_existing_unpriced_sessions_without_rewriting_price
             codex_count(100, 10, 1),
             json!({"type":"turn_context","timestamp":at(2),"payload":{"model":"gpt-5.3-codex"}}),
             codex_count(200, 20, 3),
-            json!({"type":"turn_context","timestamp":at(4),"payload":{"model":"codex-auto-review"}}),
+            json!({"type":"turn_context","timestamp":at(4),"payload":{"model":"unlisted-review-model"}}),
             codex_count(300, 30, 5),
         ],
     );
@@ -377,6 +377,63 @@ fn new_price_catalog_recovers_existing_unpriced_sessions_without_rewriting_price
     f.engine.reconcile().unwrap();
     assert_eq!(f.total(), 330);
     assert_eq!(f.snapshot()["totals"]["unpriced_tokens"], 110);
+}
+
+#[test]
+fn auto_review_history_recovers_as_an_inferred_estimate_and_exports_its_basis() {
+    let mut f = Fixture::new();
+    let log = f.logs.join("auto-review.jsonl");
+    let mut count = codex_count(1500, 250, 1);
+    count["payload"]["info"]["total_token_usage"]["cached_input_tokens"] = json!(1000);
+    write(
+        &log,
+        &[
+            json!({"type":"session_meta","timestamp":at(0),"payload":{"id":"review-recovery","cwd":"/work/app"}}),
+            json!({"type":"turn_context","timestamp":at(0),"payload":{"model":"codex-auto-review"}}),
+            count,
+        ],
+    );
+    f.scan("codex");
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    conn.execute("DELETE FROM prices WHERE id='codex-auto-review'", [])
+        .unwrap();
+    conn.execute("UPDATE events SET nano=0,data=json_set(data,'$.pricing_version','unpriced','$.usage.cost',0,'$.usage.inferred_price_tokens',0,'$.usage.unpriced_tokens',json_extract(data,'$.usage.total'))", []).unwrap();
+    f.reopen();
+    let totals = f.snapshot()["totals"].clone();
+    assert_eq!(totals["total"], 1750);
+    assert_eq!(totals["unpriced_tokens"], 0);
+    assert_eq!(totals["inferred_price_tokens"], 1750);
+    assert!((totals["cost"].as_f64().unwrap() - 0.00042).abs() < 1e-10);
+    let exported = f
+        .engine
+        .dispatch("export", json!({"format":"json"}))
+        .unwrap();
+    let exported: Value = serde_json::from_str(exported["content"].as_str().unwrap()).unwrap();
+    let event = &exported["events"][0];
+    assert_eq!(event["model"], "codex-auto-review");
+    assert!(event["warnings"].as_array().unwrap().iter().any(|w| w
+        .as_str()
+        .unwrap()
+        .contains("model inferred as GPT-5.6 Luna")));
+    assert!(exported["pricing_history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["model"] == "codex-auto-review" && p["inferred"] == true));
+    let csv = f
+        .engine
+        .dispatch("export", json!({"format":"csv"}))
+        .unwrap();
+    assert!(csv["content"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .ends_with("inferred_price_tokens"));
+    f.reopen();
+    f.engine.reconcile().unwrap();
+    assert_eq!(f.snapshot()["totals"]["inferred_price_tokens"], 1750);
 }
 
 #[test]
