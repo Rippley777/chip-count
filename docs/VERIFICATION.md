@@ -58,6 +58,14 @@ A local macOS bundle is a development artifact until it is signed and notarized 
 
 Regression refinements include zero-value corrections, authoritative finals with missing categories, source rotation fairness across restart, a cap on all visited directory entries, searchable event pages without changing totals, unknown-pricing budget coverage, and no invented previous-period baseline for all-time reports.
 
+## Pricing recovery — 2026-10-03
+
+- Added official Standard category rates for GPT-6 Astra, GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna, GPT-5.6 Sol, and GPT-5.6 Terra, including verified request-level long-context pricing.
+- All 58 core tests passed. New regressions cover each model's disjoint category costs, reasoning as an output subset, the exact long-context boundary including cached input, local override semantics, unknown model/service tiers, and startup recovery of unpriced history without changing existing priced events or overrides.
+- Formatting, workspace Clippy with warnings denied, frontend lint/build, and the macOS desktop production build passed. All 15 browser tests passed with the Rust and Vite services ready; an initial cold-start run hit the development proxy startup race before Rust was listening.
+- Relaunched the packaged native app against its existing persistent index. The Live dashboard showed a dollar estimate for today and the previously unpriced Chip Count Astra session showed $82.89. All indexed Astra tokens had price coverage. Unknown `codex-auto-review` usage remained explicitly unpriced.
+- A read-only before/after comparison verified all pre-upgrade event identities, token categories, source provenance, and ingestion timestamps. Notes, projects, budgets, source configuration, and settings were preserved. Source read/progress timestamps changed normally during reconciliation.
+
 ## Practical boundaries
 
 The macOS Apple Silicon app and ZIP are local development builds; public distribution still needs Developer ID signing and notarization. Windows/Linux release packages were not built in this environment. System notification delivery and login launch depend on the user's OS settings and were not enabled as part of verification.

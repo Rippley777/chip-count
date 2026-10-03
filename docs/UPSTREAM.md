@@ -11,6 +11,7 @@ Reviewed 2026-10-03. Parsers are independently implemented; the sources below we
 | [Tauri 2](https://v2.tauri.app/) | 2026-10-03 | Native shell, commands, capabilities, packaging |
 | [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing) | 2026-10-03 | Standard token rates and cache write duration differences |
 | [OpenAI pricing](https://developers.openai.com/api/docs/pricing) | 2026-10-03 | Standard versus fast rates; unlisted model names must remain unpriced |
+| [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra), [6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol), [6 Sol](https://developers.openai.com/api/docs/models/gpt-6-sol), [6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna), [5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra) | 2026-10-03 | Exact model IDs, Standard input/cache/output rates, cache writes at 1.25x input, and the >272K per-request long-context threshold |
 
 ## Accounting decisions
 
@@ -22,7 +23,7 @@ Subagents can contain inherited parent records. A relationship alone does not au
 
 A context capacity is not a cumulative usage allowance. Lifetime throughput must never appear as context occupancy. Limits are displayed only from actual provider reports, with timestamps and source scope; a profile name does not establish account identity.
 
-Prices are selected API-equivalent estimates, not billed subscription costs. Preserve an event's recorded pricing version until the user explicitly requests recalculation. Unsupported models or pricing conditions remain visibly incomplete.
+Prices are selected API-equivalent estimates, not billed subscription costs. Preserve an already priced event's recorded pricing version until the user explicitly requests recalculation. When a newly bundled model supplies a previously missing price, startup atomically recovers that model's eligible unpriced events. Local overrides and existing estimates are preserved. Unsupported models or pricing conditions remain visibly incomplete.
 
 ccusage is MIT licensed, copyright ryoppippi and contributors. OpenAI Codex is Apache-2.0 licensed. See upstream projects for their complete notices. Chip Count does not execute either application or require either CLI as a runtime dependency.
 
@@ -33,4 +34,4 @@ Claude response identity combines message and request IDs when present, otherwis
 
 Reported response corrections reconcile in place, including zero corrections and final records with omitted categories. SQLite retains an event's first ingestion timestamp. Copied roots contribute source/profile membership without increasing global totals.
 
-The bundled snapshot covers the explicitly listed models and standard rates only. Unknown models, unverified fast/service tiers, unsupported long-context conditions and unsupported cache-write durations remain unpriced unless a local override supplies the assumptions. Chip Count does not infer current context from lifetime throughput, infer account-wide quota from a source label, or invent unavailable request durations.
+The bundled snapshot covers the explicitly listed models and Standard rates, with verified long-context multipliers for the six GPT-6/GPT-5.6 models above. More than 272,000 request input tokens (including cache reads/writes) applies 2x input/cache and 1.5x output rates for that request; output, reasoning, and lifetime throughput do not determine this threshold. Local overrides specify the user's exact category rates without hidden multipliers. Unknown models (including `codex-auto-review`), unverified fast/service tiers, unsupported long-context conditions and unsupported cache-write durations remain unpriced unless a local override supplies the assumptions. Chip Count does not infer current context from lifetime throughput, infer account-wide quota from a source label, or invent unavailable request durations.

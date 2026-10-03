@@ -314,6 +314,72 @@ fn price_overrides_preserve_observed_estimates_until_explicit_reprice() {
 }
 
 #[test]
+fn new_price_catalog_recovers_existing_unpriced_sessions_without_rewriting_priced_history() {
+    let mut f = Fixture::new();
+    let log = f.logs.join("missing-prices.jsonl");
+    write(
+        &log,
+        &[
+            json!({"type":"session_meta","timestamp":at(0),"payload":{"id":"price-recovery","cwd":"/work/app"}}),
+            json!({"type":"turn_context","timestamp":at(0),"payload":{"model":"gpt-6-astra"}}),
+            codex_count(100, 10, 1),
+            json!({"type":"turn_context","timestamp":at(2),"payload":{"model":"gpt-5.3-codex"}}),
+            codex_count(200, 20, 3),
+            json!({"type":"turn_context","timestamp":at(4),"payload":{"model":"codex-auto-review"}}),
+            codex_count(300, 30, 5),
+        ],
+    );
+    f.scan("codex");
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    let priced_before: String = conn
+        .query_row(
+            "SELECT data FROM events WHERE model='gpt-5.3-codex'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // Recreate an older installation: Astra was absent from the catalog and pinned as unpriced.
+    conn.execute("DELETE FROM prices WHERE id='gpt-6-astra'", [])
+        .unwrap();
+    conn.execute("UPDATE events SET nano=0,data=json_set(data,'$.pricing_version','unpriced','$.usage.cost',0,'$.usage.unpriced_tokens',json_extract(data,'$.usage.total')) WHERE model='gpt-6-astra'", []).unwrap();
+    f.engine
+        .dispatch(
+            "pricing_save",
+            json!({"model":"gpt-6-sol","input":99,"output":1,"cache_read":1,"cache_write":1}),
+        )
+        .unwrap();
+    let override_before: String = conn
+        .query_row("SELECT data FROM prices WHERE id='gpt-6-sol'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    f.reopen();
+    assert_eq!(f.total(), 330);
+    assert_eq!(f.snapshot()["totals"]["unpriced_tokens"], 110);
+    let (version, nano): (String, i64) = conn.query_row("SELECT json_extract(data,'$.pricing_version'),nano FROM events WHERE model='gpt-6-astra'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(version, "bundled-2026-10-03-openai-v2");
+    assert_eq!(nano, 1_500_000);
+    let priced_after: String = conn
+        .query_row(
+            "SELECT data FROM events WHERE model='gpt-5.3-codex'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(priced_before, priced_after);
+    let override_after: String = conn
+        .query_row("SELECT data FROM prices WHERE id='gpt-6-sol'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(override_before, override_after);
+    f.reopen();
+    f.engine.reconcile().unwrap();
+    assert_eq!(f.total(), 330);
+    assert_eq!(f.snapshot()["totals"]["unpriced_tokens"], 110);
+}
+
+#[test]
 fn exports_apply_filters_redact_paths_labels_and_escape_csv_formulas() {
     let mut f = Fixture::new();
     let mut malicious = claude("export", "formula", 100, 10, 0);
