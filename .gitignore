@@ -14,3 +14,6 @@ artifacts/
 *.sqlite-wal
 src-tauri/gen/
 src-tauri/icons/icon.iconset/
+*.p8
+*.p12
+*.certSigningRequest

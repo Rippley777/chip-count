@@ -30,6 +30,8 @@ npm run check:rust     # workspace Clippy
 npm run desktop:build # native app bundle
 ```
 
+For a signed, notarized macOS release, follow the one-time Apple certificate and Keychain setup in [the notarization guide](docs/NOTARIZATION.md), then run `npm run macos:release`. `npm run macos:release:universal` builds for both Apple Silicon and Intel. The workflow verifies signing, requires Apple's Accepted status, staples the app, checks Gatekeeper, and recreates the distributable ZIP.
+
 ## Your data
 
 On launch Chip Count discovers supported local Claude Code and Codex JSONL roots. Add or disable roots in Sources, label profiles, and inspect parser diagnostics. Sources are read-only. Local session notes, aliases, tags, preferences, and budgets belong to Chip Count's SQLite index.

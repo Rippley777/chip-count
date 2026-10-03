@@ -17,6 +17,17 @@
     "tauri": "tauri",
     "desktop": "tauri dev",
     "desktop:build": "tauri build --bundles app",
+    "macos:doctor": "node scripts/macos-release.mjs doctor",
+    "macos:credentials": "node scripts/macos-release.mjs credentials",
+    "macos:build": "node scripts/macos-release.mjs build",
+    "macos:package": "node scripts/macos-release.mjs package",
+    "macos:notarize": "node scripts/macos-release.mjs notarize",
+    "macos:staple": "node scripts/macos-release.mjs staple",
+    "macos:verify": "node scripts/macos-release.mjs verify",
+    "macos:notarization:log": "node scripts/macos-release.mjs log",
+    "macos:release": "node scripts/macos-release.mjs release",
+    "macos:release:universal": "node scripts/macos-release.mjs release --target universal-apple-darwin",
+    "test:release": "node --test scripts/macos-release.test.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
