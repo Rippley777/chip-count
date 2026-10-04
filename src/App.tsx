@@ -86,6 +86,7 @@ import {
   openCompact,
   saveDesktopSettings,
   isDesktop,
+  isAppStore,
   getMonitoring,
 } from './api';
 import type {
@@ -1800,6 +1801,7 @@ export default function App() {
       <SourceDialog
         open={sourceOpen}
         source={sourceEdit}
+        demo={demo}
         onClose={() => setSourceOpen(false)}
         run={run}
         onToast={setToast}
@@ -4233,7 +4235,12 @@ function Sources({
           <Database size={22} />
         </span>
         <div>
-          <h3>{snapshot?.sources.filter((s) => s.enabled).length || 0} connected roots</h3>
+          <h3>
+            {snapshot?.sources.filter(
+              (s) => s.enabled && s.status !== 'unavailable' && s.status !== 'missing',
+            ).length || 0}{' '}
+            connected roots
+          </h3>
           <p>
             {n(snapshot?.sources.reduce((a, s) => a + s.files, 0) || 0)} files discovered ·{' '}
             {n(snapshot?.sources.reduce((a, s) => a + s.recognized, 0) || 0)} recognized records
@@ -4345,7 +4352,11 @@ function Sources({
         <Empty
           icon={FolderOpen}
           title="Connect your first source"
-          description="Chip Count looks for Claude Code and Codex logs in their standard locations. Add a custom directory or import a JSONL file to get started."
+          description={
+            isAppStore
+              ? 'Choose a Claude Code or Codex log folder to grant read-only access, or explore the demo workspace below. No coding tools are needed for the demo.'
+              : 'Chip Count looks for Claude Code and Codex logs in their standard locations. Add a custom directory or import a JSONL file to get started.'
+          }
           action={
             <button className="button primary" onClick={() => onEdit()}>
               <Plus size={14} />
@@ -4427,12 +4438,14 @@ function Sources({
 function SourceDialog({
   open,
   source,
+  demo,
   onClose,
   run,
   onToast,
 }: {
   open: boolean;
   source?: Source;
+  demo: boolean;
   onClose: () => void;
   run: Run;
   onToast: (s: string) => void;
@@ -4440,6 +4453,7 @@ function SourceDialog({
   const [provider, setProvider] = useState<'claude' | 'codex'>('claude');
   const [label, setLabel] = useState('Personal');
   const [path, setPath] = useState('');
+  const [selectionId, setSelectionId] = useState<string>();
   const [exclusions, setExclusions] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -4448,6 +4462,7 @@ function SourceDialog({
       setProvider(source?.provider || 'claude');
       setLabel(source?.label || 'Personal');
       setPath(source?.path || '');
+      setSelectionId(undefined);
       setExclusions(source?.exclusions.join('\n') || '');
       setEnabled(source?.enabled ?? true);
     }
@@ -4455,8 +4470,10 @@ function SourceDialog({
   const browse = async (directory: boolean) => {
     try {
       const p = await pickPath(directory);
-      if (p) setPath(p);
-      else if (!isDesktop)
+      if (p) {
+        setPath(p.path);
+        setSelectionId(p.selection_id);
+      } else if (!isDesktop)
         onToast(
           'Enter an absolute local path below. Native file selection is available in the desktop app.',
         );
@@ -4479,6 +4496,7 @@ function SourceDialog({
             'source_save',
             {
               id: source?.id,
+              selection_id: selectionId,
               provider,
               label: label.trim(),
               path: path.trim(),
@@ -4520,11 +4538,22 @@ function SourceDialog({
               placeholder="Personal, Work, or a custom label"
             />
           </Field>
-          <Field label="Absolute local path">
+          <Field
+            label={isAppStore && !demo ? 'Selected source' : 'Absolute local path'}
+            hint={
+              isAppStore && !demo
+                ? 'Choose folder or Import JSONL to grant access. For hidden folders press ⇧⌘G in the picker and enter ~/.claude/projects, ~/.codex/sessions, or ~/.codex/archived_sessions.'
+                : undefined
+            }
+          >
             <input
               required
               value={path}
-              onChange={(e) => setPath(e.target.value)}
+              readOnly={isAppStore && !demo}
+              onChange={(e) => {
+                setPath(e.target.value);
+                setSelectionId(undefined);
+              }}
               placeholder={
                 provider === 'claude' ? '/Users/you/.claude/projects' : '/Users/you/.codex/sessions'
               }
@@ -4736,10 +4765,14 @@ function SettingsPage({
             )}
             <Toggle
               label="Launch at login"
-              description="Keep local usage monitoring ready when you sign in."
-              value={settings.launch_at_login}
+              description={
+                isAppStore
+                  ? 'Unavailable in the App Store 1.0 build.'
+                  : 'Keep local usage monitoring ready when you sign in.'
+              }
+              value={isAppStore ? false : settings.launch_at_login}
               onChange={(v) => save({ launch_at_login: v })}
-              disabled={!isDesktop}
+              disabled={!isDesktop || isAppStore}
             />
             <Toggle
               label="Close to menu bar"

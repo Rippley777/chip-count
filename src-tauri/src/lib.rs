@@ -17,8 +17,12 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
+#[cfg(all(feature = "launch-agent", not(feature = "app-store")))]
 use tauri_plugin_autostart::ManagerExt;
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_dialog::DialogExt;
+#[cfg(target_os = "macos")]
+mod source_access;
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Deserialize)]
@@ -37,9 +41,12 @@ struct DesktopState {
     real: Arc<Mutex<Engine>>,
     demo: Arc<Mutex<Engine>>,
     paused: Arc<AtomicBool>,
+    stopping: AtomicBool,
     close_to_tray: Arc<AtomicBool>,
     notifications: Arc<AtomicBool>,
     wake: mpsc::SyncSender<()>,
+    #[cfg(feature = "app-store")]
+    access: Mutex<source_access::SourceAccess>,
 }
 
 #[tauri::command]
@@ -50,6 +57,13 @@ async fn dispatch(app: AppHandle, request: Request) -> Result<Value, String> {
     } else {
         state.real.clone()
     };
+    #[cfg(feature = "app-store")]
+    if request.command == "settings_save"
+        && request.args["settings"].get("launch_at_login").is_some()
+    {
+        return Err("Launch at login is unavailable in the App Store 1.0 build.".into());
+    }
+    let app_worker = app.clone();
     let should_wake = !request.demo
         && !matches!(
             request.command.as_str(),
@@ -59,6 +73,22 @@ async fn dispatch(app: AppHandle, request: Request) -> Result<Value, String> {
         let mut engine = engine
             .lock()
             .map_err(|_| "The local index is unavailable; restart Chip Count.".to_string())?;
+        #[cfg(feature = "app-store")]
+        if !request.demo {
+            let state = app_worker.state::<DesktopState>();
+            let mut access = state
+                .access
+                .lock()
+                .map_err(|_| "Source access is unavailable.")?;
+            let _leases = access.refresh(&mut engine)?;
+            if request.command == "source_save" {
+                let mut args = request.args;
+                access.prepare_save(&mut engine, &mut args)?;
+                return Ok(json!({"ok":true}));
+            }
+        }
+        #[cfg(not(feature = "app-store"))]
+        let _ = app_worker;
         engine
             .dispatch(&request.command, request.args)
             .map_err(|e| e.to_string())
@@ -98,6 +128,11 @@ struct DesktopSettings {
 
 #[tauri::command]
 async fn desktop_settings(app: AppHandle, settings: DesktopSettings) -> Result<Value, String> {
+    #[cfg(any(feature = "app-store", not(feature = "launch-agent")))]
+    if settings.launch_at_login.is_some() {
+        return Err("Launch at login is unavailable in this build.".into());
+    }
+    #[cfg(all(feature = "launch-agent", not(feature = "app-store")))]
     if let Some(enabled) = settings.launch_at_login {
         let manager = app.autolaunch();
         let result = if enabled {
@@ -188,33 +223,56 @@ fn allowed_reveal(path: &Path, snapshot: &Value) -> Result<PathBuf, String> {
 #[tauri::command]
 async fn reveal_path(app: AppHandle, path: String) -> Result<Value, String> {
     let engine = app.state::<DesktopState>().real.clone();
+    #[cfg(feature = "app-store")]
+    let app_worker = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let snapshot = engine
+        let mut engine = engine
             .lock()
-            .map_err(|_| "The local index is unavailable.".to_string())?
+            .map_err(|_| "The local index is unavailable.".to_string())?;
+        #[cfg(feature = "app-store")]
+        let _leases = app_worker
+            .state::<DesktopState>()
+            .access
+            .lock()
+            .map_err(|_| "Source access is unavailable.")?
+            .refresh(&mut engine)?;
+        let snapshot = engine
             .dispatch("snapshot", json!({}))
             .map_err(|e| e.to_string())?;
         let target = allowed_reveal(Path::new(&path), &snapshot)?;
+        #[cfg(feature = "app-store")]
+        {
+            let state = app_worker.state::<DesktopState>();
+            let access = state
+                .access
+                .lock()
+                .map_err(|_| "Source access is unavailable.")?;
+            if !access.allows(&target) {
+                return Err("Choose this root in Sources before revealing it in Finder.".into());
+            }
+        }
         #[cfg(target_os = "macos")]
-        let status = std::process::Command::new("/usr/bin/open")
-            .arg("-R")
-            .arg(&target)
-            .status();
-        #[cfg(target_os = "windows")]
-        let status = std::process::Command::new("explorer.exe")
-            .arg(format!("/select,{}", target.display()))
-            .status();
-        #[cfg(target_os = "linux")]
-        let status = std::process::Command::new("xdg-open")
-            .arg(if target.is_dir() {
-                target.as_path()
-            } else {
-                target.parent().unwrap_or(&target)
-            })
-            .status();
-        let status = status.map_err(|e| format!("Could not open the file manager: {e}"))?;
-        if !status.success() {
-            return Err("The system file manager could not reveal this path.".into());
+        on_main(&app, move || source_access::reveal(&target))?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            #[cfg(target_os = "windows")]
+            let status = std::process::Command::new("explorer.exe")
+                .arg(format!("/select,{}", target.display()))
+                .status();
+            #[cfg(target_os = "linux")]
+            let status = std::process::Command::new("xdg-open")
+                .arg(if target.is_dir() {
+                    target.as_path()
+                } else {
+                    target.parent().unwrap_or(&target)
+                })
+                .status();
+            if !status
+                .map_err(|e| format!("Could not open the file manager: {e}"))?
+                .success()
+            {
+                return Err("The system file manager could not reveal this path.".into());
+            }
         }
         Ok(json!({"ok":true}))
     })
@@ -236,23 +294,49 @@ async fn save_export(app: AppHandle, content: String, filename: String) -> Resul
         .unwrap_or("chip-count.json")
         .to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        let extension = if filename.ends_with(".csv") {
-            "csv"
-        } else {
-            "json"
-        };
-        let selected = app
-            .dialog()
-            .file()
-            .set_file_name(&filename)
-            .add_filter("Usage export", &[extension])
-            .blocking_save_file();
-        let Some(selected) = selected else {
+        #[cfg(target_os = "macos")]
+        let selected = on_main(&app, move || source_access::save_panel(&filename))?;
+        #[cfg(target_os = "macos")]
+        let Some(selected) = selected
+        else {
             return Ok(json!({"saved":false}));
         };
-        let path = selected
-            .into_path()
-            .map_err(|_| "Select a local file to save the export.".to_string())?;
+        #[cfg(target_os = "macos")]
+        let path = selected.path.clone();
+        #[cfg(not(target_os = "macos"))]
+        let path = {
+            let extension = if filename.ends_with(".csv") {
+                "csv"
+            } else {
+                "json"
+            };
+            let selected = app
+                .dialog()
+                .file()
+                .set_file_name(&filename)
+                .add_filter("Usage export", &[extension])
+                .blocking_save_file();
+            let Some(selected) = selected else {
+                return Ok(json!({"saved":false}));
+            };
+            selected
+                .into_path()
+                .map_err(|_| "Select a local export file.")?
+        };
+        let engine = app.state::<DesktopState>().real.clone();
+        let mut engine = engine
+            .lock()
+            .map_err(|_| "The local index is unavailable.")?;
+        #[cfg(feature = "app-store")]
+        let _leases = app
+            .state::<DesktopState>()
+            .access
+            .lock()
+            .map_err(|_| "Source access is unavailable.")?
+            .refresh(&mut engine)?;
+        #[cfg(not(feature = "app-store"))]
+        let _ = &mut engine;
+        ensure_export_destination(&path, &engine.source_records().map_err(|e| e.to_string())?)?;
         // The only writable destination comes directly from the native dialog.
         std::fs::write(&path, content.as_bytes())
             .map_err(|e| format!("Could not save export: {e}"))?;
@@ -260,6 +344,73 @@ async fn save_export(app: AppHandle, content: String, filename: String) -> Resul
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Native UI work is scheduled from a blocking worker, never blocks Tauri's UI thread.
+#[cfg(target_os = "macos")]
+fn on_main<T: Send + 'static>(
+    app: &AppHandle,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = tx.send(work());
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv()
+        .map_err(|_| "The native dialog closed unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+async fn select_source(app: AppHandle, directory: bool) -> Result<Value, String> {
+    #[cfg(feature = "app-store")]
+    return tauri::async_runtime::spawn_blocking(move || {
+        let value = on_main(&app, move || source_access::choose(directory))?;
+        let state = app.state::<DesktopState>();
+        let result = state
+            .access
+            .lock()
+            .map_err(|_| "Source access is unavailable.")?
+            .selected(value);
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    #[cfg(not(feature = "app-store"))]
+    {
+        let _ = (app, directory);
+        Err("Use the native dialog in this build.".into())
+    }
+}
+
+/// Export must never overwrite a transcript or write within any configured source.
+fn ensure_export_destination(path: &Path, sources: &[Value]) -> Result<(), String> {
+    let target = if path.exists() {
+        path.canonicalize()
+    } else {
+        path.parent()
+            .unwrap_or(Path::new("/"))
+            .canonicalize()
+            .map(|p| p.join(path.file_name().unwrap_or_default()))
+    }
+    .map_err(|e| format!("The export destination is unavailable: {e}"))?;
+    for source in sources {
+        if let Some(root) = source["path"].as_str() {
+            let root = Path::new(root)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(root));
+            if target == root || target.starts_with(&root) {
+                return Err(
+                    "Save the export outside your source folders to keep original logs unchanged."
+                        .into(),
+                );
+            }
+        }
+    }
+    if target.extension().is_some_and(|e| e == "jsonl") {
+        return Err("Save exports as JSON or CSV; JSONL source logs are read-only.".into());
+    }
+    Ok(())
 }
 
 fn watch_changed_roots(
@@ -275,11 +426,16 @@ fn watch_changed_roots(
         for old in current.difference(&next) {
             let _ = watcher.unwatch(old);
         }
+        let mut watched: BTreeSet<_> = current.intersection(&next).cloned().collect();
         for new in next.difference(current) {
-            let _ = watcher.watch(new, RecursiveMode::Recursive);
+            if watcher.watch(new, RecursiveMode::Recursive).is_ok() {
+                watched.insert(new.clone());
+            }
         }
+        *current = watched;
+    } else {
+        current.clear();
     }
-    *current = next;
 }
 
 fn notification_history(path: &Path) -> BTreeSet<String> {
@@ -321,9 +477,11 @@ fn start_monitor(
                 })
                 .ok();
             let mut roots = BTreeSet::new();
+            #[cfg(feature = "app-store")]
+            let mut _watch_leases = Vec::new();
             let mut notified = notification_history(&history_path);
             let mut first_pass = true;
-            loop {
+            while !state.stopping.load(Ordering::Relaxed) {
                 let paused = state.paused.load(Ordering::Relaxed);
                 let _ = pause_item.set_text(if paused {
                     "Resume monitoring"
@@ -336,8 +494,20 @@ fn start_monitor(
                             .real
                             .lock()
                             .map_err(|_| "The local index is unavailable.".to_string())?;
+                        #[cfg(feature = "app-store")]
+                        let leases = state
+                            .access
+                            .lock()
+                            .map_err(|_| "Source access is unavailable.")?
+                            .refresh(&mut engine)?;
                         engine.reconcile().map_err(|e| e.to_string())?;
                         watch_changed_roots(&mut watcher, &mut roots, engine.watch_roots());
+                        // Unwatch first, then release previous grants. Watchers retain their scopes
+                        // across polling, sleep/wake, and paused monitoring.
+                        #[cfg(feature = "app-store")]
+                        {
+                            _watch_leases = leases;
+                        }
                         engine
                             .dispatch("snapshot", json!({}))
                             .map_err(|e| e.to_string())
@@ -402,6 +572,18 @@ fn start_monitor(
                         }
                     }
                 }
+                // Source removal/disable/revocation must also retire watchers while paused.
+                #[cfg(feature = "app-store")]
+                if paused {
+                    if let Ok(mut engine) = state.real.lock() {
+                        if let Ok(mut access) = state.access.lock() {
+                            if let Ok(leases) = access.refresh(&mut engine) {
+                                watch_changed_roots(&mut watcher, &mut roots, engine.watch_roots());
+                                _watch_leases = leases;
+                            }
+                        }
+                    }
+                }
                 // Checkpoints make this cheap; polling also recovers missed notifications/sleep.
                 if receiver.recv_timeout(Duration::from_secs(3)).is_ok() {
                     std::thread::sleep(Duration::from_millis(150));
@@ -409,19 +591,30 @@ fn start_monitor(
                 // Coalesce a burst of filesystem changes into one pass.
                 while receiver.try_recv().is_ok() {}
             }
+            // Drop native watchers before the final scopes on normal app exit.
+            drop(watcher);
+            #[cfg(feature = "app-store")]
+            {
+                _watch_leases.clear();
+                if let Ok(mut access) = state.access.lock() {
+                    access.clear();
+                };
+            }
         })
         .expect("could not start index worker");
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
-        .plugin(
-            tauri_plugin_autostart::Builder::new()
-                .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
-                .build(),
-        )
+        .plugin(tauri_plugin_notification::init());
+    #[cfg(all(feature = "launch-agent", not(feature = "app-store")))]
+    let builder = builder.plugin(
+        tauri_plugin_autostart::Builder::new()
+            .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
+            .build(),
+    );
+    builder
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(
@@ -432,21 +625,40 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            #[cfg(feature = "app-store")]
+            let directory = app.path().app_data_dir()?;
+            #[cfg(not(feature = "app-store"))]
             let directory = std::env::var_os("CHIP_COUNT_DATA_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
             std::fs::create_dir_all(&directory)?;
-            let real = Arc::new(Mutex::new(Engine::open(
-                &directory.join("chip-count.sqlite"),
-            )?));
+            #[cfg(feature = "app-store")]
+            let mut engine = Engine::sandboxed(&directory.join("chip-count.sqlite"))?;
+            #[cfg(not(feature = "app-store"))]
+            let engine = Engine::open(&directory.join("chip-count.sqlite"))?;
+            #[cfg(feature = "app-store")]
+            let access = {
+                let mut access = source_access::SourceAccess::default();
+                access.refresh(&mut engine)?;
+                engine.dispatch(
+                    "settings_save",
+                    json!({"settings":{"launch_at_login":false}}),
+                )?;
+                engine.reconcile()?;
+                access
+            };
+            let real = Arc::new(Mutex::new(engine));
             let demo = Arc::new(Mutex::new(Engine::demo()?));
             let (wake, receiver) = mpsc::sync_channel(1);
             let snapshot = real.lock().unwrap().dispatch("snapshot", json!({}))?;
             app.manage(DesktopState {
                 real,
                 demo,
+                #[cfg(feature = "app-store")]
+                access: Mutex::new(access),
                 wake,
                 paused: Arc::new(AtomicBool::new(false)),
+                stopping: AtomicBool::new(false),
                 close_to_tray: Arc::new(AtomicBool::new(
                     snapshot["settings"]["close_to_tray"]
                         .as_bool()
@@ -526,11 +738,17 @@ pub fn run() {
             desktop_settings,
             compact,
             reveal_path,
-            save_export
+            save_export,
+            select_source
         ])
         .build(tauri::generate_context!())
         .expect("Chip Count could not start")
         .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                let state = app.state::<DesktopState>();
+                state.stopping.store(true, Ordering::Relaxed);
+                let _ = state.wake.try_send(());
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 open_main(app);
@@ -543,6 +761,27 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn export_cannot_overwrite_sources_or_follow_symlinks_into_them() {
+        let root = std::env::temp_dir().join(format!("chip-export-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::write(root.join("logs/session.jsonl"), "source").unwrap();
+        let sources = vec![json!({"path":root.join("logs")})];
+        assert!(ensure_export_destination(&root.join("export.json"), &sources).is_ok());
+        assert!(ensure_export_destination(&root.join("logs/export.json"), &sources).is_err());
+        assert!(ensure_export_destination(&root.join("logs/session.jsonl"), &sources).is_err());
+        assert!(ensure_export_destination(&root.join("other.jsonl"), &sources).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("logs"), root.join("linked")).unwrap();
+            assert!(ensure_export_destination(&root.join("linked/export.csv"), &sources).is_err());
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join("logs/session.jsonl")).unwrap(),
+            "source"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn reveal_rejects_paths_outside_known_roots() {
         let root = std::env::temp_dir().join(format!("chip-reveal-{}", std::process::id()));

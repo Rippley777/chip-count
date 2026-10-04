@@ -1,5 +1,6 @@
 import type { Commands, ExportResult, Settings } from './types';
 export const isDesktop = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+export const isAppStore = isDesktop && import.meta.env.VITE_APP_STORE === '1';
 export async function api<K extends keyof Commands>(
   command: K,
   args: Commands[K]['args'],
@@ -31,18 +32,24 @@ export async function api<K extends keyof Commands>(
     throw new Error(body.error || 'The local index could not complete this request.');
   return body;
 }
-export async function pickPath(directory = true): Promise<string | null> {
+export async function pickPath(
+  directory = true,
+): Promise<{ path: string; selection_id?: string } | null> {
   if (!isDesktop)
     throw new Error(
       'Native folder and file selection is available in the desktop app. Enter an absolute path here to use the browser preview.',
     );
+  if (isAppStore) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke('select_source', { directory });
+  }
   const { open } = await import('@tauri-apps/plugin-dialog');
   const result = await open({
     directory,
     multiple: false,
     ...(!directory ? { filters: [{ name: 'Session logs', extensions: ['jsonl'] }] } : {}),
   });
-  return typeof result === 'string' ? result : null;
+  return typeof result === 'string' ? { path: result } : null;
 }
 export async function saveExport(result: ExportResult): Promise<void> {
   if (isDesktop) {

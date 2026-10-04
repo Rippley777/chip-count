@@ -1,55 +1,453 @@
-# Chip Count
+# 🎰 Chip Count
 
-**Know where every token went.**
+### Know what you're spending before the house does.
 
-A local-first AI session analytics desktop app for the Rippley Labs ecosystem. Rust owns discovery, indexing, accounting and exports; React renders the same data in the Tauri app and development preview. There is no cloud service, login, API key, or transcript upload.
+**Chip Count** is a local-first desktop dashboard for understanding your AI coding usage.
 
-## Develop
+Sessions. Tokens. Models. Cache hits. Burn rate. API-equivalent cost.
 
-Build requirements: Node.js 20.19+ (22 recommended), npm, Rust 1.95 (pinned in `rust-toolchain.toml`), and [Tauri's platform prerequisites](https://v2.tauri.app/start/prerequisites/). An installed app does not require these tools.
+No spreadsheets. No mystery math. No wondering where the hell 80 million tokens went.
 
-```sh
-npm ci
-npm run desktop
+**Count every chip.**
+
+---
+
+<p align="center">
+  <img src="./docs/screenshots/live.webp" alt="Chip Count live sessions dashboard" width="100%" />
+</p>
+
+<p align="center">
+  <strong>Your sessions stay yours.</strong><br />
+  Local monitoring. Local metadata. No uploads. No API keys required for local usage analysis.
+</p>
+
+---
+
+## The house always keeps count.
+
+Now you can too.
+
+AI coding tools are spectacularly good at making token usage disappear into the background. You start a session, ask for a refactor, chase a bug for an hour, hand something off to another model...
+
+...and suddenly you've burned millions of tokens across twelve sessions and have absolutely no idea where they went.
+
+Chip Count turns that mess into something you can actually understand.
+
+It watches your local session data and gives you a live view of:
+
+- 🎯 active AI coding sessions
+- 🪙 observed token usage
+- 💸 API-equivalent cost
+- ⚡ current token burn rate
+- 🧠 model usage
+- ♻️ cache effectiveness
+- 📁 usage by project
+- 📈 historical trends
+- 🕒 session history
+- 🎲 budgets and limits
+
+Not because every token needs to be rationed.
+
+Because **you should know where your chips are going.**
+
+---
+
+## Live table
+
+<p align="center">
+  <img src="./docs/screenshots/live.webp" alt="Chip Count live session monitoring" width="100%" />
+</p>
+
+See what your coding agents are doing **right now**.
+
+Chip Count surfaces active and recent sessions across your projects, including token totals, model information, estimated cost, recent activity, and usage velocity.
+
+Open a session to inspect it without digging through log files.
+
+### At a glance
+
+- active sessions
+- tokens used today
+- estimated spend
+- recent tokens/minute
+- provider and model
+- project association
+- session activity
+- usage timeline
+- cache behavior
+- priced vs. unpriced usage
+
+Think `top`, but for the tiny artificial engineers eating your context window.
+
+---
+
+## Know where the chips went
+
+<p align="center">
+  <img src="./docs/screenshots/analytics.webp" alt="Chip Count usage analytics" width="100%" />
+</p>
+
+Totals are nice.
+
+**Answers are better.**
+
+Chip Count's analytics are built around a much simpler question:
+
+> Where are my tokens actually going?
+
+Break usage down across time, models, projects, sessions, and token types.
+
+See whether your usage is climbing because of output generation, giant context windows, poor cache utilization, one particularly hungry project, or the 3 AM agent session you absolutely do not remember starting.
+
+### Analytics include
+
+- usage over time
+- input vs. output tokens
+- cache reads and writes
+- estimated API-equivalent cost
+- model mix
+- busiest projects
+- average usage per session
+- historical periods
+- session-level drilldown
+
+---
+
+## 🧮 API-equivalent cost
+
+Chip Count can translate observed token usage into an estimated API-equivalent cost using model pricing metadata.
+
+That number is intentionally described as an **estimate**.
+
+Your actual subscription cost, provider billing, promotions, bundled usage, limits, and caching rules may differ.
+
+Chip Count isn't pretending your subscription is secretly an API bill.
+
+It's answering a more useful question:
+
+> **"Roughly how much compute did I just throw at this problem?"**
+
+And sometimes the answer is hilarious.
+
+---
+
+## ⚡ Watch the burn
+
+A token count tells you what already happened.
+
+A **burn rate** tells you what's happening now.
+
+Chip Count tracks recent usage velocity so you can spot unusually aggressive sessions before they quietly consume half the county's electricity trying to rename a button.
+
+Use pacing indicators to understand:
+
+- tokens per minute
+- unusually heavy sessions
+- usage spikes
+- projected consumption
+- changes in behavior between models and projects
+
+Your AI can move fast.
+
+Chip Count makes sure you can see **how fast**.
+
+---
+
+## 🧠 Model intelligence
+
+Not every model burns tokens the same way.
+
+Chip Count keeps model usage visible so you can compare how different models behave across your actual work.
+
+See:
+
+- token consumption
+- session counts
+- estimated cost
+- cache usage
+- project distribution
+- share of overall usage
+
+If one model is responsible for half your token pile, you'll know.
+
+---
+
+## 📁 Project-aware
+
+Tokens without context aren't very interesting.
+
+Chip Count associates sessions with the projects you're actually working on so you can answer questions like:
+
+> Why did **Pit Boss** consume twice as much as **Deck** this week?
+
+> Which project is generating the longest sessions?
+
+> Where am I spending most of my AI-assisted development time?
+
+> Which repo is apparently attempting to bankrupt me?
+
+Your projects become first-class usage dimensions instead of anonymous log entries.
+
+---
+
+## 🛡️ Local intelligence
+
+Chip Count is designed around a simple rule:
+
+> **Your development activity does not need to become somebody else's telemetry.**
+
+Where possible, Chip Count works from data already present on your machine.
+
+No analytics account should be required just to understand your own analytics.
+
+No cloud database should be required just to inspect your own sessions.
+
+No unnecessary copy of your prompts, code, or project history needs to exist somewhere else.
+
+Your machine.
+
+Your sessions.
+
+Your chips.
+
+---
+
+## 🎰 Budgets & limits
+
+Not every limit has to be a panic button.
+
+Set boundaries around the things you actually care about:
+
+- token usage
+- estimated cost
+- projects
+- models
+- time periods
+
+Then use Chip Count as an instrument panel instead of discovering your usage after the fact.
+
+---
+
+## 🔍 Session history
+
+Every session tells a story.
+
+Usually one involving:
+
+1. a perfectly reasonable request,
+2. an unexpected architecture discussion,
+3. fourteen files changing,
+4. three increasingly desperate follow-up prompts,
+5. and 900,000 tokens.
+
+Chip Count keeps your session history searchable and inspectable so you can understand how your usage evolved instead of staring at one giant monthly total.
+
+---
+
+## 🆚 Compare
+
+Compare sessions, models, projects, or time periods to see how your workflow changes.
+
+Because:
+
+> "This feels more expensive."
+
+is considerably less useful than:
+
+> "This model used 34% more tokens per comparable session."
+
+Vibes are great.
+
+Data is better.
+
+---
+
+## 📤 Your data isn't trapped
+
+Chip Count is an analytics tool, not a data hostage situation.
+
+Export your usage data when you need it for:
+
+- spreadsheets
+- deeper analysis
+- personal dashboards
+- accounting
+- experiments
+- backups
+- questionable late-night Python scripts
+
+CSV and JSON export make your data yours outside Chip Count too.
+
+---
+
+## 🌗 Looks good after midnight
+
+Chip Count supports both light and dark appearances.
+
+Because some of us write software during normal business hours.
+
+And some of us look up and realize it's **2:13 AM**.
+
+No judgment.
+
+<p align="center">
+  <em>Dark mode doesn't reduce token usage, but emotionally it helps.</em>
+</p>
+
+---
+
+# Under the hood
+
+Chip Count is a native desktop application built with **Rust + Tauri**.
+
+The architecture is intentionally local-first:
+
+```text
+┌─────────────────────┐
+│ Local AI tooling    │
+│ session / usage logs│
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│     Chip Count      │
+│                     │
+│  Parse              │
+│  Normalize          │
+│  Price              │
+│  Aggregate          │
+│  Analyze            │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ Local persistence   │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ Live + historical   │
+│ analytics           │
+└─────────────────────┘
 ```
 
-The browser development preview runs both the Rust service and Vite:
+The goal is simple:
 
-```sh
-npm run dev
-```
+**observe locally, normalize cleanly, explain beautifully.**
 
-Open `http://127.0.0.1:1431`. The loopback service is for development only; the installed app invokes Rust directly. Folder/save dialogs, Finder/Explorer reveal, menu bar, startup integration, and always-on-top windows are desktop features.
+---
 
-```sh
-npm run build          # TypeScript + production frontend
-npm run lint
-npm run test:rust      # independent accounting/index tests
-npm test              # browser interaction tests
-npm run check:rust     # workspace Clippy
-npm run desktop:build # native app bundle
-```
+## Supported sources
 
-For a signed, notarized macOS release, follow the one-time Apple certificate and Keychain setup in [the notarization guide](docs/NOTARIZATION.md), then run `npm run macos:release`. `npm run macos:release:universal` builds for both Apple Silicon and Intel. The workflow verifies signing, requires Apple's Accepted status, staples the app, checks Gatekeeper, and recreates the distributable ZIP.
+Chip Count is being built to understand usage from modern AI development tooling, including local session information produced by tools such as:
 
-## Your data
+- Claude Code
+- Codex
+- additional providers as their local data formats are supported
 
-On launch Chip Count discovers supported local Claude Code and Codex JSONL roots. Add or disable roots in Sources, label profiles, and inspect parser diagnostics. Sources are read-only. Local session notes, aliases, tags, preferences, and budgets belong to Chip Count's SQLite index.
+Provider integrations are intentionally normalized into a common internal model so the analytics layer doesn't need to care which agent produced the session.
 
-Production starts with actual discovery. **Explore demo** uses a separate in-memory SQLite store with synthetic sessions, goes through the same Rust calculations, and can be exited immediately. Demo data is never inserted into the production index.
+---
 
-`CODEX_HOME` and `CLAUDE_CONFIG_DIR` configure provider discovery. Custom directories and individual JSONL files can be added in Sources. The development server supports `CHIP_COUNT_DATA_DIR` for its own index location; see `cargo run -p chip-server -- --help` for available startup behavior. Do not point it at a source log directory.
+## Pricing metadata
 
-## Architecture and correctness
+Model pricing changes.
 
-- `crates/chip-core`: independent SQLite index, provider adapters, canonical usage accounting, queries, pricing, budgets, exports, fixtures and tests.
-- `crates/chip-server`: loopback development bridge to that core.
-- `src-tauri`: native IPC, background filesystem reconciliation, tray and windows, native dialogs and validated OS actions.
-- `src`: typed React interface, virtualized session views, charts and inspectors.
-- [IPC contract](docs/IPC.md), [source research](docs/UPSTREAM.md), and [verification notes](docs/VERIFICATION.md).
+Frequently.
 
-Usage and cost are limited to observed local records. API-equivalent cost is not a bill. Unknown model pricing is shown as unpriced. Provider-reported limits carry their observation timestamp and scope. Inferred activity is based on event gaps and is not human working time. Original model identifiers are retained.
+Because apparently stability would be boring.
 
-Large histories are ingested in bounded resumable batches, with durable rotating cursors and paginated session/event views. Aggregation runs in Rust over indexed metadata; multi-million-event installations have not been performance-qualified.
+Chip Count keeps model and pricing metadata separate from the core analytics logic so new models and pricing changes can be incorporated without rewriting the application.
 
-No ecosystem telemetry, shared authentication, or cross-application database access is enabled. Chip Count owns its own local analytics; optional future integrations must use explicit versioned contracts.
+Unknown usage is also shown as **unpriced** rather than silently inventing a number.
+
+Because fake precision is worse than no precision.
+
+---
+
+# Philosophy
+
+Chip Count is not trying to tell you that using AI is bad.
+
+Quite the opposite.
+
+Use the expensive model.
+
+Run six agents.
+
+Give one of them a 200,000-token context window because you don't feel like explaining the architecture again.
+
+Go nuts.
+
+But if we're going to drive these things like race cars, it'd be nice if somebody installed a **fuel gauge**.
+
+That's Chip Count.
+
+---
+
+## Status
+
+> 🚧 **Early development / pre-1.0**
+
+Chip Count is currently being polished toward its first public release.
+
+The goal for 1.0 is deliberately boring:
+
+**Make the core experience excellent.**
+
+Not accounts.
+
+Not teams.
+
+Not a cloud platform.
+
+Not seventeen integrations nobody asked for.
+
+A fast, beautiful, reliable desktop application that answers:
+
+> **What are my AI coding tools doing, and where are my tokens going?**
+
+---
+
+## Road to 1.0
+
+Core launch priorities:
+
+- [ ] rock-solid session ingestion
+- [ ] live session monitoring
+- [ ] daily / weekly / monthly analytics
+- [ ] token and cost breakdowns
+- [ ] model analytics
+- [ ] session history
+- [ ] burn-rate and pacing indicators
+- [ ] useful charts
+- [ ] centralized model/pricing metadata
+- [ ] local-first persistence
+- [ ] polished empty/loading/error states
+- [ ] excellent keyboard navigation
+- [ ] native macOS menus
+- [ ] light + dark themes
+- [ ] CSV / JSON export
+- [ ] production iconography
+- [ ] App Store screenshots
+- [ ] signed production build
+- [ ] Mac App Store submission
+
+**Scope creep goes to 1.1.**
+
+The casino closes when 1.0 ships.
+
+---
+
+## Built by Rippley Labs
+
+Chip Count is a **Rippley Labs** project.
+
+Small software for people who like knowing what their computers are actually doing.
+
+---
+
+<p align="center">
+  <strong>🎰 CHIP COUNT</strong><br />
+  <sub>Count your chips. Know your burn.</sub>
+</p>

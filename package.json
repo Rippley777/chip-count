@@ -28,7 +28,12 @@
     "macos:release": "node scripts/macos-release.mjs release",
     "macos:release:universal": "node scripts/macos-release.mjs release --target universal-apple-darwin",
     "test:release": "node --test scripts/macos-release.test.mjs",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "appstore:local": "node scripts/appstore.mjs local",
+    "appstore:build": "node scripts/appstore.mjs build",
+    "appstore:package": "node scripts/appstore.mjs package",
+    "appstore:verify": "node scripts/appstore.mjs verify",
+    "test:appstore": "node --test scripts/appstore.test.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

@@ -17,3 +17,4 @@ src-tauri/icons/icon.iconset/
 *.p8
 *.p12
 *.certSigningRequest
+*.provisionprofile

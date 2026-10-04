@@ -535,6 +535,7 @@ name = "chip-count"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "chip-core",
  "chrono",
  "notify",

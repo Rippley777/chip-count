@@ -240,6 +240,7 @@ export interface Commands {
   };
   source_save: {
     args: {
+      selection_id?: string;
       id?: string;
       provider: Provider;
       label: string;

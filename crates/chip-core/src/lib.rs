@@ -12,13 +12,15 @@ use model::*;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
 pub struct Engine {
     pub(crate) db: Connection,
     pub(crate) is_demo: bool,
+    // None is the development/direct-distribution policy. Sandbox grants are runtime-only.
+    pub(crate) source_grants: Option<HashMap<String, PathBuf>>,
 }
 impl Engine {
     pub fn open(path: &Path) -> Result<Self> {
@@ -28,6 +30,47 @@ impl Engine {
         let mut engine = Self::init(Connection::open(path)?, false)?;
         engine.discover()?;
         Ok(engine)
+    }
+    /// No environment or home discovery; every external source requires a native grant.
+    pub fn sandboxed(path: &Path) -> Result<Self> {
+        let mut engine = Self::init(Connection::open(path)?, false)?;
+        engine.source_grants = Some(HashMap::new());
+        Ok(engine)
+    }
+    pub fn source_records(&self) -> Result<Vec<Value>> {
+        self.list("sources")
+    }
+    pub fn set_source_grants(&mut self, grants: HashMap<String, PathBuf>) {
+        self.source_grants = Some(grants);
+    }
+    pub fn source_bookmark(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        self.get("config", &format!("bookmark:{id}"))?
+            .map(|v| serde_json::from_value(v).map_err(Into::into))
+            .transpose()
+    }
+    pub fn save_source_bookmark(&self, id: &str, bookmark: &[u8]) -> Result<()> {
+        self.put("config", &format!("bookmark:{id}"), &json!(bookmark))
+    }
+    /// Commit a native selection and its bookmark together, before any scan.
+    pub fn save_bookmarked_source(&self, args: Value, bookmark: &[u8]) -> Result<()> {
+        let id = required(&args, "id")?.to_owned();
+        self.db.execute_batch("SAVEPOINT native_source")?;
+        let result = self
+            .save_source(args, false)
+            .and_then(|()| self.save_source_bookmark(&id, bookmark));
+        if result.is_err() {
+            self.db.execute_batch("ROLLBACK TO native_source")?;
+        }
+        self.db.execute_batch("RELEASE native_source")?;
+        result
+    }
+    /// Called only by the native bookmark resolver while its scope is held.
+    pub fn relocate_source(&self, id: &str, path: &Path) -> Result<()> {
+        if let Some(mut source) = self.get("sources", id)? {
+            source["path"] = json!(path);
+            self.put("sources", id, &source)?;
+        }
+        Ok(())
     }
     pub fn demo() -> Result<Self> {
         let mut e = Self::init(Connection::open_in_memory()?, true)?;
@@ -54,7 +97,11 @@ impl Engine {
           CREATE TABLE IF NOT EXISTS limits(id TEXT PRIMARY KEY, data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS prices(id TEXT PRIMARY KEY, data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS config(id TEXT PRIMARY KEY, data TEXT NOT NULL);")?;
-        let e = Self { db, is_demo };
+        let e = Self {
+            db,
+            is_demo,
+            source_grants: None,
+        };
         if e.get("config", "settings")?.is_none() {
             e.put("config", "settings", &settings_default())?;
         }
@@ -98,9 +145,21 @@ impl Engine {
         self.list("sources")
             .unwrap_or_default()
             .iter()
-            .filter(|s| s["enabled"] == true)
+            .filter(|s| s["enabled"] == true && self.source_authorized(s))
             .filter_map(|s| s["path"].as_str().map(PathBuf::from))
             .collect()
+    }
+    pub(crate) fn source_authorized(&self, source: &Value) -> bool {
+        self.source_grants.as_ref().is_none_or(|grants| {
+            source["id"]
+                .as_str()
+                .and_then(|id| grants.get(id))
+                .is_some_and(|path| {
+                    source["path"]
+                        .as_str()
+                        .is_some_and(|s| path == Path::new(s))
+                })
+        })
     }
     fn discover(&mut self) -> Result<()> {
         if self.get("config", "discovered")?.is_some() {
@@ -178,6 +237,11 @@ impl Engine {
             .map(str::to_owned)
             .unwrap_or_else(|| hash(&format!("{provider}:{canonical}")));
         let old = self.get("sources", &id)?;
+        let disabling_existing =
+            args["enabled"] == false && old.as_ref().is_some_and(|s| s["path"] == canonical);
+        if !disabling_existing && !self.source_authorized(&json!({"id":id,"path":canonical})) {
+            bail!("Choose this source with the native folder or JSONL picker to grant access.");
+        }
         let changed = old.as_ref().is_some_and(|s| {
             s["path"] != canonical
                 || s["provider"] != provider
@@ -266,6 +330,10 @@ impl Engine {
                 Ok(json!({"ok":true}))
             }
             "source_remove" => {
+                self.db.execute(
+                    "DELETE FROM config WHERE id=?1",
+                    [format!("bookmark:{}", required(&args, "id")?)],
+                )?;
                 self.db
                     .execute("DELETE FROM sources WHERE id=?1", [required(&args, "id")?])?;
                 Ok(json!({"ok":true}))

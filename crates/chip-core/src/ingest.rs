@@ -35,6 +35,10 @@ impl Engine {
             if source["enabled"] != true {
                 source["status"] = json!("disabled");
                 self.put("sources", source["id"].as_str().unwrap_or(""), &source)?;
+            } else if !self.source_authorized(&source) {
+                source["status"] = json!("unavailable");
+                source["message"] = json!("Access is unavailable. Choose this folder or JSONL file again in Configure source to grant read-only access.");
+                self.put("sources", source["id"].as_str().unwrap_or(""), &source)?;
             } else {
                 sources.push(source);
             }
@@ -222,6 +226,7 @@ impl Engine {
         let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let path_s = path.to_string_lossy().to_string();
         let source_id = source["id"].as_str().unwrap_or("");
+        // Source transcripts are always opened read-only, including rebuilds.
         let mut file = File::open(&path).context("Cannot open source file")?;
         let metadata = file.metadata()?;
         let length = metadata.len();
