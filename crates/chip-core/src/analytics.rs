@@ -1,6 +1,7 @@
+use crate::calendar::{bound, resolve, Range};
 use crate::{model::*, required, Engine};
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, Utc};
 use chrono_tz::Tz;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -10,6 +11,7 @@ struct View {
     all: Vec<Event>,
     meta: HashMap<String, SessionMeta>,
     tz: Tz,
+    range: Range,
 }
 fn total<'a>(events: impl Iterator<Item = &'a Event>) -> Usage {
     let mut u = Usage::default();
@@ -24,25 +26,6 @@ fn date(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|x| x.with_timezone(&Utc))
-}
-fn bound(s: Option<&str>, tz: Tz, end: bool) -> Result<Option<DateTime<Utc>>> {
-    s.map(|s| {
-        if let Ok(day) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-            let day = if end {
-                day.succ_opt().context("Invalid date")?
-            } else {
-                day
-            };
-            let local = day.and_hms_opt(0, 0, 0).unwrap();
-            tz.from_local_datetime(&local)
-                .earliest()
-                .map(|d| d.with_timezone(&Utc))
-                .context("Date falls in an unsupported timezone transition")
-        } else {
-            date(s).context("Use ISO timestamps or YYYY-MM-DD dates")
-        }
-    })
-    .transpose()
 }
 fn in_range(e: &Event, from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> bool {
     date(&e.timestamp).is_some_and(|t| from.is_none_or(|x| t >= x) && to.is_none_or(|x| t < x))
@@ -68,19 +51,87 @@ fn buckets<'a>(
         .collect()
 }
 fn timeline(events: &[Event], tz: Tz, elapsed: Option<DateTime<Utc>>) -> Vec<Value> {
-    buckets(events.iter(), |e| {
+    let mut groups: BTreeMap<i64, Usage> = BTreeMap::new();
+    for e in events.iter().filter(|e| e.scope == "session-own") {
+        if let Some(t) = date(&e.timestamp) {
+            let minute = elapsed
+                .map(|start| (t - start).num_seconds().max(0) / 60)
+                .unwrap_or(t.timestamp().div_euclid(60));
+            groups.entry(minute).or_default().add(&e.usage);
+        }
+    }
+    let keys: Vec<_> = groups.keys().copied().collect();
+    for pair in keys.windows(2) {
+        if pair[1] - pair[0] > 1 {
+            groups.entry(pair[0] + 1).or_default();
+            groups.entry(pair[1] - 1).or_default();
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(minute, u)| {
+            let key = if elapsed.is_some() {
+                format!("{minute:05}m")
+            } else {
+                DateTime::from_timestamp(minute * 60, 0)
+                    .unwrap()
+                    .with_timezone(&tz)
+                    .format("%Y-%m-%d %H:%M %:z")
+                    .to_string()
+            };
+            let mut v = serde_json::to_value(u).unwrap();
+            v["key"] = json!(key);
+            v["label"] = json!(key);
+            v["x"] = json!(minute * 60_000);
+            v
+        })
+        .collect()
+}
+fn daily_buckets(events: &[Event], tz: Tz, range: &Range) -> Vec<Value> {
+    let existing = buckets(events.iter(), |e| {
         date(&e.timestamp)
-            .map(|t| {
-                if let Some(start) = elapsed {
-                    format!("{:05}m", (t - start).num_minutes().max(0))
-                } else {
-                    t.with_timezone(&tz)
-                        .format("%Y-%m-%d %H:%M %:z")
-                        .to_string()
-                }
-            })
-            .unwrap_or_else(|| "Unknown".into())
-    })
+            .unwrap()
+            .with_timezone(&tz)
+            .format("%Y-%m-%d")
+            .to_string()
+    });
+    let mut groups: BTreeMap<String, Value> = existing
+        .into_iter()
+        .map(|v| (v["key"].as_str().unwrap().to_owned(), v))
+        .collect();
+    let first = range
+        .from
+        .or_else(|| events.iter().filter_map(|e| date(&e.timestamp)).min());
+    let last = range
+        .to
+        .map(|t| {
+            if range.from == Some(t) {
+                t
+            } else {
+                t - Duration::nanoseconds(1)
+            }
+        })
+        .or_else(|| events.iter().filter_map(|e| date(&e.timestamp)).max());
+    if let Some((first, last)) = first.zip(last) {
+        let mut day = first.with_timezone(&tz).date_naive();
+        let last = last.with_timezone(&tz).date_naive();
+        while day <= last {
+            let key = day.to_string();
+            let v = groups
+                .entry(key.clone())
+                .or_insert_with(|| serde_json::to_value(Usage::default()).unwrap());
+            v["key"] = json!(key);
+            v["label"] = json!(key);
+            // Civil days have uniform daily spacing; minute timelines use elapsed instants.
+            v["x"] = json!(day
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis());
+            day = day.succ_opt().unwrap();
+        }
+    }
+    groups.into_values().collect()
 }
 fn activity(events: &[&Event]) -> i64 {
     let mut times: Vec<_> = events.iter().filter_map(|e| date(&e.timestamp)).collect();
@@ -109,11 +160,10 @@ impl Engine {
             .as_str()
             .unwrap_or("UTC")
             .parse::<Tz>()?;
-        let from = bound(filter.from.as_deref(), tz, false)?;
-        let to = bound(filter.to.as_deref(), tz, true)?;
-        if from.zip(to).is_some_and(|(a, b)| a >= b) {
-            bail!("Date range must end after it starts");
-        }
+        let range = resolve(filter, tz, Utc::now())?;
+        let from = range.from;
+        let to = range.to;
+        let as_of = range.as_of;
         let all = self.events()?;
         let mut meta = HashMap::new();
         for v in self.list("sessions")? {
@@ -204,7 +254,7 @@ impl Engine {
             let (id, source) = row?;
             if let (Some(id), Some(label)) = (id, source_labels.get(&source)) {
                 let cutoff =
-                    Utc::now() - Duration::days(settings["retention_days"].as_i64().unwrap_or(365));
+                    as_of - Duration::days(settings["retention_days"].as_i64().unwrap_or(365));
                 if meta
                     .get(&id)
                     .is_some_and(|m| date(&m.last_at).is_some_and(|t| t >= cutoff))
@@ -289,8 +339,8 @@ impl Engine {
             let state = if m.completed {
                 "completed"
             } else if date(&m.last_at).is_some_and(|d| {
-                d <= Utc::now()
-                    && Utc::now() - d
+                d <= as_of
+                    && as_of - d
                         < Duration::minutes(settings["inactivity_minutes"].as_i64().unwrap_or(10))
             }) {
                 "active"
@@ -366,7 +416,7 @@ impl Engine {
                 .zip(date(&m.first_at))
                 .map(|(a, b)| (a - b).num_seconds().max(0))
                 .unwrap_or(0);
-            let end = date(&m.last_at).unwrap_or(Utc::now());
+            let end = date(&m.last_at).unwrap_or(as_of);
             let mut spark = vec![0u64; 20];
             for e in &events {
                 if let Some(t) = date(&e.timestamp) {
@@ -419,27 +469,23 @@ impl Engine {
             all,
             meta,
             tz,
+            range,
         })
     }
     pub(crate) fn snapshot(&self, filter: Filter) -> Result<Value> {
         let v = self.view(&filter)?;
-        let now_local = Utc::now().with_timezone(&v.tz);
+        let as_of = v.range.as_of;
+        let now_local = as_of.with_timezone(&v.tz);
         let day = now_local.format("%Y-%m-%d").to_string();
         let today = total(v.events.iter().filter(|e| {
-            date(&e.timestamp)
-                .is_some_and(|t| t.with_timezone(&v.tz).format("%Y-%m-%d").to_string() == day)
+            date(&e.timestamp).is_some_and(|t| {
+                t <= as_of && t.with_timezone(&v.tz).format("%Y-%m-%d").to_string() == day
+            })
         }));
         let recent = total(v.events.iter().filter(|e| {
-            date(&e.timestamp)
-                .is_some_and(|t| t <= Utc::now() && Utc::now() - t <= Duration::minutes(5))
+            date(&e.timestamp).is_some_and(|t| t <= as_of && as_of - t <= Duration::minutes(5))
         }));
-        let daily = buckets(v.events.iter(), |e| {
-            date(&e.timestamp)
-                .unwrap()
-                .with_timezone(&v.tz)
-                .format("%Y-%m-%d")
-                .to_string()
-        });
+        let daily = daily_buckets(&v.events, v.tz, &v.range);
         let models = buckets(v.events.iter(), |e| e.model.clone());
         let providers = buckets(v.events.iter(), |e| {
             v.meta
@@ -468,16 +514,34 @@ impl Engine {
                     .format("%a")
             )
         });
-        let previous = if let Some(from) = bound(filter.from.as_deref(), v.tz, false)? {
-            let to = bound(filter.to.as_deref(), v.tz, true)?.unwrap_or_else(Utc::now);
-            let mut previous_filter = filter.clone();
-            previous_filter.from = Some((from - (to - from)).to_rfc3339());
-            previous_filter.to = Some(from.to_rfc3339());
-            Some(total(self.view(&previous_filter)?.events.iter()))
-        } else {
-            // All-time history has no comparable preceding period.
-            None
+        let prior_usage = |end: Option<DateTime<Utc>>| -> Result<Option<Usage>> {
+            if let Some((start, end)) = v.range.previous_from.zip(end) {
+                let mut f = filter.clone();
+                f.period = None;
+                f.from = Some(start.to_rfc3339());
+                f.to = Some(end.to_rfc3339());
+                if start == end {
+                    return Ok(Some(Usage::default()));
+                }
+                Ok(Some(total(self.view(&f)?.events.iter())))
+            } else {
+                Ok(None)
+            }
         };
+        let previous = prior_usage(v.range.previous_to)?;
+        let previous_complete = prior_usage(v.range.prior_complete_to)?;
+        let mut top_sessions = v.sessions.clone();
+        top_sessions.sort_by(|a, b| {
+            b["usage"]["total"]
+                .as_u64()
+                .cmp(&a["usage"]["total"].as_u64())
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+        top_sessions.truncate(5);
+        let mut reporting = serde_json::to_value(&v.range)?;
+        reporting["observed_from"] =
+            json!(v.events.iter().filter_map(|e| date(&e.timestamp)).min());
+        reporting["observed_to"] = json!(v.events.iter().filter_map(|e| date(&e.timestamp)).max());
         let projects = self.project_views(&v)?;
         let budgets = self.budget_views(&v.all, &v.meta, v.tz)?;
         let mut alerts = self.list("alerts")?;
@@ -494,7 +558,7 @@ impl Engine {
             .collect();
         let warnings=vec!["Observed local usage may not cover all devices or account activity.","API-equivalent cost is an estimate, not a subscription charge.","Active time sums gaps between observed events, capping each gap at five minutes; it is not human working time."];
         Ok(
-            json!({"sessions":sessions,"total_sessions":v.sessions.len(),"totals":total(v.events.iter()),"today":today,"recent_rate":recent.total as f64/5.,"active_sessions":v.sessions.iter().filter(|s|s["state"]=="active").count(),"sources":self.list("sources")?,"projects":projects,"daily":daily,"models":models,"providers":providers,"hours":hours,"weekdays":weekdays,"previous":previous,"budgets":budgets,"alerts":alerts,"prices":self.list("prices")?,"settings":self.settings()?,"limits":self.list("limits")?,"indexed_at":self.get("config","indexed_at")?.unwrap_or(json!(now())),"warnings":warnings,"demo":self.is_demo}),
+            json!({"sessions":sessions,"total_sessions":v.sessions.len(),"totals":total(v.events.iter()),"today":today,"recent_rate":recent.total as f64/5.,"active_sessions":v.sessions.iter().filter(|s|s["state"]=="active").count(),"sources":self.list("sources")?,"projects":projects,"daily":daily,"models":models,"providers":providers,"hours":hours,"weekdays":weekdays,"previous":previous,"previous_complete":previous_complete,"reporting":reporting,"top_sessions":top_sessions,"budgets":budgets,"alerts":alerts,"prices":self.list("prices")?,"settings":self.settings()?,"limits":self.list("limits")?,"indexed_at":self.get("config","indexed_at")?.unwrap_or(json!(now())),"warnings":warnings,"demo":self.is_demo}),
         )
     }
     fn project_views(&self, v: &View) -> Result<Vec<Value>> {
@@ -525,7 +589,7 @@ impl Engine {
             models.sort();
             models.dedup();
             let mut spark = vec![0u64; 30];
-            let today = Utc::now().with_timezone(&v.tz).date_naive();
+            let today = v.range.as_of.with_timezone(&v.tz).date_naive();
             for e in &events {
                 if let Some(t) = date(&e.timestamp) {
                     let days = (today - t.with_timezone(&v.tz).date_naive()).num_days();
@@ -771,6 +835,7 @@ impl Engine {
             }
             for range in ranges {
                 let mut f = filter.clone();
+                f.period = None;
                 f.from = Some(required(range, "from")?.into());
                 f.to = Some(required(range, "to")?.into());
                 let v = self.view(&f)?;
@@ -832,13 +897,14 @@ impl Engine {
             all: vec![],
             meta: HashMap::new(),
             tz: v.tz,
+            range: v.range.clone(),
         };
         let history: Vec<_> = self
             .list("config")?
             .into_iter()
             .filter(|p| p.get("model").is_some() && p.get("version").is_some())
             .collect();
-        let mut data = json!({"schema_version":1,"projects":self.project_views(&project_view)?,"pricing_history":history,"exported_at":now(),"units":{"tokens":"integer tokens","cost":"USD API-equivalent estimate"},"timezone":v.tz.to_string(),"filters":clean_filter(&filter),"pricing":self.list("prices")?,"coverage":"Local observed records; carry-in and parent rollups excluded from totals; not complete account usage.","totals":total(events.iter()),"sessions":sessions,"events":events});
+        let mut data = json!({"schema_version":1,"projects":self.project_views(&project_view)?,"pricing_history":history,"exported_at":now(),"units":{"tokens":"integer tokens","cost":"USD API-equivalent estimate"},"timezone":v.tz.to_string(),"reporting":v.range,"filters":clean_filter(&filter),"pricing":self.list("prices")?,"coverage":"Local observed records; carry-in and parent rollups excluded from totals; not complete account usage.","totals":total(events.iter()),"sessions":sessions,"events":events});
         redact(&mut data, paths, labels);
         let format = required(args, "format")?;
         let (content, mime, extension) = match format {
@@ -869,6 +935,7 @@ impl Engine {
                     "pricing_history_json",
                     "unknown_categories_json",
                     "inferred_price_tokens",
+                    "reporting_range_json",
                 ];
                 let mut csv = header.join(",") + "\r\n";
                 for e in data["events"].as_array().unwrap() {
@@ -893,6 +960,7 @@ impl Engine {
                         data["pricing_history"].clone(),
                         e["usage"]["unknown_fields"].clone(),
                         e["usage"]["inferred_price_tokens"].clone(),
+                        data["reporting"].clone(),
                     ];
                     csv.push_str(&vals.iter().map(csv_cell).collect::<Vec<_>>().join(","));
                     csv.push_str("\r\n");

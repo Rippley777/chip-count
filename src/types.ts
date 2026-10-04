@@ -9,6 +9,7 @@ export type Page =
   | 'Sources'
   | 'Settings';
 export interface Filter {
+  period?: string;
   search?: string;
   provider?: string;
   profile?: string;
@@ -65,6 +66,7 @@ export interface Session {
   warnings: string[];
 }
 export interface Bucket extends Usage {
+  x?: number;
   key: string;
   label: string;
 }
@@ -151,7 +153,26 @@ export interface Limit {
   observed_at: string;
   window_minutes: number | null;
 }
+export interface ReportingRange {
+  as_of: string;
+  timezone: string;
+  period: string;
+  week_start: string;
+  from: string | null;
+  to: string | null;
+  from_local: string | null;
+  to_local: string | null;
+  observed_from: string | null;
+  observed_to: string | null;
+  comparison: string | null;
+  previous_from: string | null;
+  previous_to: string | null;
+  prior_complete_to: string | null;
+}
 export interface Snapshot {
+  reporting: ReportingRange;
+  top_sessions: Session[];
+  previous_complete: Usage | null;
   sessions: Session[];
   total_sessions: number;
   totals: Usage;

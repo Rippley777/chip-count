@@ -240,11 +240,18 @@ pub struct Price {
     #[serde(default)]
     pub inferred: bool,
 }
+pub fn detected_timezone() -> String {
+    iana_time_zone::get_timezone()
+        .ok()
+        .filter(|s| s.parse::<chrono_tz::Tz>().is_ok())
+        .unwrap_or_else(|| "UTC".into())
+}
 pub fn settings_default() -> Value {
-    json!({"theme":"dark","density":"comfortable","timezone":"UTC","inactivity_minutes":10,"close_to_tray":true,"launch_at_login":false,"notifications":false,"retention_days":365,"redact_paths":false,"redact_labels":false,"monthly_subscription":null})
+    json!({"theme":"dark","density":"comfortable","timezone":detected_timezone(),"inactivity_minutes":10,"close_to_tray":true,"launch_at_login":false,"notifications":false,"retention_days":365,"redact_paths":false,"redact_labels":false,"monthly_subscription":null})
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Filter {
+    pub period: Option<String>,
     pub search: Option<String>,
     pub provider: Option<String>,
     pub profile: Option<String>,

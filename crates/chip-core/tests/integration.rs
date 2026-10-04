@@ -430,7 +430,7 @@ fn auto_review_history_recovers_as_an_inferred_estimate_and_exports_its_basis() 
         .lines()
         .next()
         .unwrap()
-        .ends_with("inferred_price_tokens"));
+        .ends_with("inferred_price_tokens,reporting_range_json"));
     f.reopen();
     f.engine.reconcile().unwrap();
     assert_eq!(f.snapshot()["totals"]["inferred_price_tokens"], 1750);

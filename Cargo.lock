@@ -522,6 +522,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "globset",
+ "iana-time-zone",
  "rusqlite",
  "serde",
  "serde_json",

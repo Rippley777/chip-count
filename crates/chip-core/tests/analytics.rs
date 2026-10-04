@@ -625,3 +625,164 @@ fn unbounded_history_has_no_previous_period_but_bounded_comparison_matches_span(
     assert_eq!(day["totals"]["total"], 10);
     assert_eq!(day["previous"]["total"], 5);
 }
+
+#[test]
+fn sparse_history_keeps_zero_days_elapsed_minutes_and_canonical_categories() {
+    let (_tmp, mut e) = engine(&[
+        record("sparse", "first", "2024-02-01T12:00:00Z", 3, "/repo"),
+        record("sparse", "last", "2024-03-03T12:00:00Z", 7, "/repo"),
+    ]);
+    invoke(
+        &mut e,
+        "settings_save",
+        json!({"settings":{"timezone":"UTC"}}),
+    );
+    let s = invoke(&mut e, "snapshot", json!({}));
+    let daily = s["daily"].as_array().unwrap();
+    assert_eq!(daily.len(), 32);
+    assert_eq!(
+        daily.iter().find(|b| b["key"] == "2024-02-29").unwrap()["total"],
+        0
+    );
+    for pair in daily.windows(2) {
+        assert_eq!(
+            pair[1]["x"].as_i64().unwrap() - pair[0]["x"].as_i64().unwrap(),
+            86_400_000
+        );
+    }
+    for b in daily {
+        assert_eq!(
+            b["total"].as_u64().unwrap(),
+            ["input", "output", "cache_read", "cache_write"]
+                .iter()
+                .map(|k| b[k].as_u64().unwrap())
+                .sum::<u64>()
+        );
+    }
+    let detail = invoke(&mut e, "session", json!({"id":"claude:sparse"}));
+    let timeline = detail["timeline"].as_array().unwrap();
+    assert_eq!(timeline.len(), 4); // Sparse zero edges, without materializing 44,640 minutes.
+    assert_eq!(timeline[1]["total"], 0);
+    assert_eq!(timeline[2]["total"], 0);
+    assert_eq!(
+        timeline.last().unwrap()["x"].as_i64().unwrap() - timeline[0]["x"].as_i64().unwrap(),
+        31 * 86_400_000
+    );
+    assert_eq!(
+        timeline
+            .iter()
+            .map(|b| b["total"].as_u64().unwrap())
+            .sum::<u64>(),
+        10
+    );
+}
+
+#[test]
+fn global_top_sessions_precede_pagination_and_use_filtered_event_usage() {
+    let mut records = vec![record(
+        "large-old",
+        "old",
+        "2026-01-01T12:00:00Z",
+        100_000,
+        "/repo",
+    )];
+    for i in 0..501 {
+        records.push(record(
+            &format!("recent-{i}"),
+            &format!("r-{i}"),
+            "2026-09-01T12:00:00Z",
+            1,
+            "/repo",
+        ));
+    }
+    let (_tmp, mut e) = engine(&records);
+    let s = invoke(&mut e, "snapshot", json!({}));
+    assert_eq!(s["total_sessions"], 502);
+    assert_eq!(s["sessions"].as_array().unwrap().len(), 500);
+    assert!(!s["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["id"] == "claude:large-old"));
+    assert_eq!(s["top_sessions"][0]["id"], "claude:large-old");
+    let page = invoke(
+        &mut e,
+        "snapshot",
+        json!({"filter":{"offset":501,"limit":1}}),
+    );
+    assert_eq!(page["top_sessions"], s["top_sessions"]);
+    let filtered = invoke(
+        &mut e,
+        "snapshot",
+        json!({"filter":{"from":"2026-09-01","to":"2026-09-01"}}),
+    );
+    assert!(filtered["top_sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["id"] != "claude:large-old"));
+}
+
+#[test]
+fn midnight_filter_agrees_across_cards_charts_detail_and_both_exports() {
+    let (_tmp, mut e) = engine(&[
+        record("spanning", "before", "2024-02-29T05:59:59Z", 1, "/repo"),
+        record("spanning", "inside", "2024-02-29T06:00:00Z", 2, "/repo"),
+        record("spanning", "last", "2024-03-01T05:59:59Z", 4, "/repo"),
+        record("spanning", "after", "2024-03-01T06:00:00Z", 8, "/repo"),
+    ]);
+    invoke(
+        &mut e,
+        "settings_save",
+        json!({"settings":{"timezone":"America/Chicago"}}),
+    );
+    let filter = json!({"from":"2024-02-29","to":"2024-02-29"});
+    let s = invoke(&mut e, "snapshot", json!({"filter":filter}));
+    assert_eq!(s["totals"]["total"], 6);
+    assert_eq!(s["sessions"][0]["usage"]["total"], 6);
+    assert_eq!(s["daily"][0]["total"], 6);
+    assert_eq!(s["reporting"]["from"], "2024-02-29T06:00:00Z");
+    let detail = invoke(
+        &mut e,
+        "session",
+        json!({"id":"claude:spanning","filter":filter}),
+    );
+    assert_eq!(detail["session"]["usage"]["total"], 6);
+    assert_eq!(detail["event_count"], 2);
+    let export = invoke(&mut e, "export", json!({"format":"json","filter":filter}));
+    let data: Value = serde_json::from_str(export["content"].as_str().unwrap()).unwrap();
+    assert_eq!(data["totals"]["total"], 6);
+    assert_eq!(data["reporting"]["from"], s["reporting"]["from"]);
+    let csv = invoke(&mut e, "export", json!({"format":"csv","filter":filter}));
+    assert!(csv["content"]
+        .as_str()
+        .unwrap()
+        .contains("reporting_range_json"));
+    assert_eq!(csv["content"].as_str().unwrap().lines().count(), 3);
+}
+
+#[test]
+fn fresh_workspace_uses_detected_iana_zone_and_persists_override() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("fresh.sqlite");
+    let mut e = Engine::isolated(&path).unwrap();
+    let s = invoke(&mut e, "snapshot", json!({}));
+    assert_eq!(
+        s["settings"]["timezone"],
+        chip_core::model::detected_timezone()
+    );
+    invoke(
+        &mut e,
+        "settings_save",
+        json!({"settings":{"timezone":"Asia/Kathmandu"}}),
+    );
+    drop(e);
+    let mut e = Engine::isolated(&path).unwrap();
+    let s = invoke(&mut e, "snapshot", json!({"filter":{"period":"today"}}));
+    assert_eq!(s["reporting"]["timezone"], "Asia/Kathmandu");
+    assert!(s["reporting"]["from_local"]
+        .as_str()
+        .unwrap()
+        .ends_with("T00:00:00+05:45"));
+    assert!(s["previous_complete"].is_object());
+}

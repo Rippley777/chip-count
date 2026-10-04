@@ -166,6 +166,16 @@ const time = (
   value && !Number.isNaN(Date.parse(value))
     ? new Date(value).toLocaleString('en-US', { ...options, timeZone: displayTimezone })
     : 'Unavailable';
+const fmtDate = (value: string) =>
+  time(value, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZoneName: 'short',
+  });
 const date = (value: string) => time(value, { month: 'short', day: 'numeric' });
 const elapsed = (s: number) =>
   s >= 3600
@@ -404,19 +414,22 @@ function ChartTooltip({
   active,
   payload,
   label,
+  formatLabel,
 }: {
   active?: boolean;
   payload?: {
     color?: string;
     name?: string | number;
     value?: number | string | (number | string)[];
+    payload?: Partial<Usage>;
   }[];
-  label?: string;
+  label?: string | number;
+  formatLabel?: (value: string | number) => string;
 }) {
   if (!active || !payload?.length) return null;
   return (
     <div className="chart-tooltip">
-      <strong>{label}</strong>
+      <strong>{formatLabel ? formatLabel(label ?? '') : label}</strong>
       {payload.map((p, i) => (
         <div key={i}>
           <i style={{ background: p.color }} />
@@ -429,6 +442,16 @@ function ChartTooltip({
           </b>
         </div>
       ))}
+      {payload.some((p) => String(p.name).toLowerCase().includes('cost')) &&
+        payload[0]?.payload && (
+          <p className="small-note">
+            {payload[0].payload.unpriced_tokens ||
+            payload[0].payload.unknown_fields?.some((k) => k !== 'reasoning')
+              ? 'Partial estimate · '
+              : ''}
+            {costCoverage({ ...ZERO, ...payload[0].payload }, 'Known prices for observed events')}
+          </p>
+        )}
     </div>
   );
 }
@@ -449,118 +472,158 @@ function UsageChart({
   rate?: boolean;
   onInterval?: (from: string, to: string) => void;
 }) {
+  const timeAxis = data.length > 0 && data.every((b) => typeof b.x === 'number');
+  const timeLabel = (x: number) =>
+    data.find((b) => b.x === x)?.label ||
+    (data[0]?.key.endsWith('m')
+      ? Math.round(x / 60000) + ' min'
+      : data[0]?.key.length === 10
+        ? new Date(x).toISOString().slice(0, 10)
+        : fmtDate(new Date(x).toISOString()));
+  const coverage = data.reduce(
+    (u, b) => ({
+      ...u,
+      total: u.total + b.total,
+      unpriced_tokens: u.unpriced_tokens + b.unpriced_tokens,
+      inferred_price_tokens: (u.inferred_price_tokens || 0) + (b.inferred_price_tokens || 0),
+      unknown_fields: [...new Set([...(u.unknown_fields || []), ...(b.unknown_fields || [])])],
+    }),
+    { ...ZERO },
+  );
   return (
-    <div className="chart" style={{ height }}>
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart
-          data={data}
-          margin={{ top: 15, right: 8, left: -14, bottom: 0 }}
-          onClick={(e) => {
-            const index = Number(e?.activeTooltipIndex);
-            const bucket = Number.isFinite(index)
-              ? data[index]
-              : data.find((d) => d.label === e?.activeLabel);
-            if (bucket && onClick) onClick(bucket.key);
-          }}
-        >
-          <defs>
-            <linearGradient id="amberFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--amber)" stopOpacity={0.24} />
-              <stop offset="95%" stopColor="var(--amber)" stopOpacity={0.015} />
-            </linearGradient>
-            <linearGradient id="mintFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--mint)" stopOpacity={0.2} />
-              <stop offset="95%" stopColor="var(--mint)" stopOpacity={0.01} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid stroke="var(--chart-grid)" vertical={false} strokeDasharray="3 5" />
-          <XAxis
-            dataKey="label"
-            tick={{ fill: 'var(--text-muted)', fontSize: 10 }}
-            axisLine={false}
-            tickLine={false}
-            minTickGap={36}
-          />
-          <YAxis
-            tick={{ fill: 'var(--text-muted)', fontSize: 10, fontFamily: 'var(--mono)' }}
-            axisLine={false}
-            tickLine={false}
-            tickFormatter={(v) => (cost ? money(v, 1) : compact(v))}
-          />
-          <Tooltip content={<ChartTooltip />} />
-          {stacked ? (
-            <>
+    <div>
+      <div className="chart" style={{ height }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart
+            data={data}
+            margin={{ top: 15, right: 8, left: -14, bottom: 0 }}
+            onClick={(e) => {
+              const index = Number(e?.activeTooltipIndex);
+              const bucket = Number.isFinite(index)
+                ? data[index]
+                : data.find((d) => d.label === e?.activeLabel);
+              if (bucket && onClick) onClick(bucket.key);
+            }}
+          >
+            <defs>
+              <linearGradient id="amberFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="var(--amber)" stopOpacity={0.24} />
+                <stop offset="95%" stopColor="var(--amber)" stopOpacity={0.015} />
+              </linearGradient>
+              <linearGradient id="mintFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="var(--mint)" stopOpacity={0.2} />
+                <stop offset="95%" stopColor="var(--mint)" stopOpacity={0.01} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid stroke="var(--chart-grid)" vertical={false} strokeDasharray="3 5" />
+            <XAxis
+              dataKey={timeAxis ? 'x' : 'label'}
+              type={timeAxis ? 'number' : 'category'}
+              scale={timeAxis ? 'linear' : 'auto'}
+              domain={timeAxis ? ['dataMin', 'dataMax'] : undefined}
+              tickFormatter={timeAxis ? timeLabel : undefined}
+              ticks={timeAxis && data[0]?.key.length === 10 ? data.map((b) => b.x!) : undefined}
+              tick={{ fill: 'var(--text-muted)', fontSize: 10 }}
+              axisLine={false}
+              tickLine={false}
+              minTickGap={36}
+            />
+            <YAxis
+              tick={{ fill: 'var(--text-muted)', fontSize: 10, fontFamily: 'var(--mono)' }}
+              axisLine={false}
+              tickLine={false}
+              tickFormatter={(v) => (cost ? money(v, 1) : compact(v))}
+            />
+            <Tooltip
+              content={
+                <ChartTooltip
+                  formatLabel={(label) => (timeAxis ? timeLabel(Number(label)) : String(label))}
+                />
+              }
+            />
+            {stacked ? (
+              <>
+                <Area
+                  isAnimationActive={false}
+                  type="linear"
+                  dataKey="input"
+                  name="Input tokens"
+                  stackId="tokens"
+                  stroke="var(--amber)"
+                  fill="url(#amberFill)"
+                  strokeWidth={2}
+                />
+                <Area
+                  isAnimationActive={false}
+                  type="linear"
+                  dataKey="output"
+                  name="Output tokens"
+                  stackId="tokens"
+                  stroke="var(--mint)"
+                  fill="url(#mintFill)"
+                  strokeWidth={2}
+                />
+                <Area
+                  isAnimationActive={false}
+                  type="linear"
+                  dataKey="cache_read"
+                  name="Cache-read tokens"
+                  stackId="tokens"
+                  stroke="#a6a2ca"
+                  fill="#a6a2ca"
+                  fillOpacity={0.1}
+                  strokeWidth={1.5}
+                />
+                <Area
+                  isAnimationActive={false}
+                  type="linear"
+                  dataKey="cache_write"
+                  name="Cache-write tokens"
+                  stackId="tokens"
+                  stroke="#809bb9"
+                  fill="#809bb9"
+                  fillOpacity={0.1}
+                  strokeWidth={1.5}
+                />
+              </>
+            ) : (
               <Area
                 isAnimationActive={false}
-                type="monotone"
-                dataKey="input"
-                name="Input tokens"
-                stackId="tokens"
+                type="linear"
+                dataKey={cost ? 'cost' : 'total'}
+                name={cost ? 'Estimated cost' : rate ? 'Tokens / minute' : 'Observed tokens'}
                 stroke="var(--amber)"
                 fill="url(#amberFill)"
                 strokeWidth={2}
               />
-              <Area
-                isAnimationActive={false}
-                type="monotone"
-                dataKey="output"
-                name="Output tokens"
-                stackId="tokens"
-                stroke="var(--mint)"
-                fill="url(#mintFill)"
-                strokeWidth={2}
+            )}
+            {onInterval && data.length > 1 && (
+              <Brush
+                dataKey="label"
+                height={22}
+                stroke="var(--amber)"
+                fill="var(--surface-raised)"
+                ariaLabel="Select timeline interval"
+                travellerWidth={9}
+                onDragEnd={({ startIndex, endIndex }) => {
+                  const first = data[startIndex ?? 0]?.key;
+                  const last = data[endIndex ?? data.length - 1]?.key;
+                  if (first && last) onInterval(first, last);
+                }}
               />
-              <Area
-                isAnimationActive={false}
-                type="monotone"
-                dataKey="cache_read"
-                name="Cache-read tokens"
-                stackId="tokens"
-                stroke="#a6a2ca"
-                fill="#a6a2ca"
-                fillOpacity={0.1}
-                strokeWidth={1.5}
-              />
-              <Area
-                isAnimationActive={false}
-                type="monotone"
-                dataKey="cache_write"
-                name="Cache-write tokens"
-                stackId="tokens"
-                stroke="#809bb9"
-                fill="#809bb9"
-                fillOpacity={0.1}
-                strokeWidth={1.5}
-              />
-            </>
-          ) : (
-            <Area
-              isAnimationActive={false}
-              type="monotone"
-              dataKey={cost ? 'cost' : 'total'}
-              name={cost ? 'Estimated cost' : rate ? 'Tokens / minute' : 'Observed tokens'}
-              stroke="var(--amber)"
-              fill="url(#amberFill)"
-              strokeWidth={2}
-            />
-          )}
-          {onInterval && data.length > 1 && (
-            <Brush
-              dataKey="label"
-              height={22}
-              stroke="var(--amber)"
-              fill="var(--surface-raised)"
-              ariaLabel="Select timeline interval"
-              travellerWidth={9}
-              onDragEnd={({ startIndex, endIndex }) => {
-                const first = data[startIndex ?? 0]?.key;
-                const last = data[endIndex ?? data.length - 1]?.key;
-                if (first && last) onInterval(first, last);
-              }}
-            />
-          )}
-        </AreaChart>
-      </ResponsiveContainer>
+            )}
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+      {cost && (
+        <p className="small-note">
+          API-equivalent estimate in USD ·{' '}
+          {coverage.unpriced_tokens > 0 || coverage.unknown_fields?.some((k) => k !== 'reasoning')
+            ? 'Partial estimate · '
+            : ''}
+          {costCoverage(coverage, 'Known prices for observed events')} · not a bill.
+        </p>
+      )}
     </div>
   );
 }
@@ -660,7 +723,11 @@ export default function App() {
         'session',
         {
           id,
-          filter: { ...filter, ...detailRange },
+          filter: {
+            ...filter,
+            ...detailRange,
+            period: detailRange.from || detailRange.to ? undefined : filter.period,
+          },
           event_search: eventQuery.search,
           event_offset: eventQuery.offset,
         },
@@ -1098,6 +1165,22 @@ export default function App() {
             'page-content ' + (['Live', 'Sessions'].includes(page) ? 'workspace-page' : '')
           }
         >
+          {snapshot && (
+            <p className="small-note" aria-label="Reporting range">
+              {snapshot.reporting.timezone}
+              {' · '}
+              {snapshot.reporting.from_local ||
+                (snapshot.reporting.observed_from
+                  ? fmtDate(snapshot.reporting.observed_from)
+                  : 'Start of observed history')}
+              {' → '}
+              {snapshot.reporting.to_local ||
+                (snapshot.reporting.observed_to
+                  ? fmtDate(snapshot.reporting.observed_to)
+                  : 'End of observed history')}
+              {snapshot.reporting.to ? ' (end exclusive)' : ' (observed history)'}
+            </p>
+          )}
           {!['Live', 'Sessions'].includes(page) && activeFilters.length > 0 && (
             <div className="filter-chips" aria-label="Active workspace filters">
               {activeFilters.map(([key, value]) => (
@@ -1221,7 +1304,6 @@ export default function App() {
                   value={snapshot ? compact(snapshot.recent_rate) : '—'}
                   suffix="/ min"
                   note="Observed in the last 5 minutes"
-                  spark={snapshot?.hours.slice(-12).map((b) => b.total)}
                 />
               </div>
               <div className="session-filters">
@@ -1284,14 +1366,18 @@ export default function App() {
                     <input
                       type="date"
                       value={filter.from?.slice(0, 10) || ''}
-                      onChange={(e) => updateFilter({ from: e.target.value || undefined })}
+                      onChange={(e) =>
+                        updateFilter({ period: undefined, from: e.target.value || undefined })
+                      }
                     />
                   </Field>
                   <Field label="Through">
                     <input
                       type="date"
                       value={filter.to?.slice(0, 10) || ''}
-                      onChange={(e) => updateFilter({ to: e.target.value || undefined })}
+                      onChange={(e) =>
+                        updateFilter({ period: undefined, to: e.target.value || undefined })
+                      }
                     />
                   </Field>
                   <Field label="Tag">
@@ -1972,12 +2058,17 @@ function SessionList({
                     )}
                   </span>
                   {columns.activity && (
-                    <Sparkline
-                      values={s.sparkline}
-                      color={s.state === 'active' ? 'var(--mint)' : 'var(--chart-muted)'}
-                      width={67}
-                      height={20}
-                    />
+                    <span
+                      title="Observed tokens in 3-minute buckets during the hour ending at the session’s last activity"
+                      aria-label="Tokens during the session’s last hour"
+                    >
+                      <Sparkline
+                        values={s.sparkline}
+                        color={s.state === 'active' ? 'var(--mint)' : 'var(--chart-muted)'}
+                        width={67}
+                        height={20}
+                      />
+                    </span>
                   )}
                 </div>
               </button>
@@ -2422,7 +2513,7 @@ function Inspector({
                     if (!Number.isNaN(first.getTime()) && !Number.isNaN(last.getTime()))
                       onRange({
                         from: first.toISOString(),
-                        to: new Date(last.getTime() + 59999).toISOString(),
+                        to: new Date(last.getTime() + 60000).toISOString(),
                       });
                   }}
                 />
@@ -2938,17 +3029,9 @@ function Analytics({
   onExport: () => void;
 }) {
   const [metric, setMetric] = useState<'tokens' | 'cost'>('tokens');
-  const [period, setPeriod] = useState(filter.from || filter.to ? 'custom' : 'all');
+  const period = filter.period || (filter.from || filter.to ? 'custom' : 'all');
   const selectPeriod = (p: string) => {
-    setPeriod(p);
-    if (p === 'all') {
-      onFilter({ from: undefined, to: undefined });
-      return;
-    }
-    if (p === 'custom') return;
-    const d = new Date();
-    d.setDate(d.getDate() - Number(p));
-    onFilter({ from: d.toISOString(), to: undefined });
+    onFilter({ period: p, from: undefined, to: undefined });
   };
   if (!snapshot)
     return (
@@ -2964,7 +3047,8 @@ function Analytics({
     !u.unknown_fields?.some((k) => k !== 'reasoning') &&
     !snapshot.previous?.unknown_fields?.some((k) => k !== 'reasoning');
   const change = previous && complete ? ((u.total - previous) / previous) * 100 : null;
-  const dayDrill = (key: string) => onDrill({ from: key.slice(0, 10), to: key.slice(0, 10) });
+  const dayDrill = (key: string) =>
+    onDrill({ period: undefined, from: key.slice(0, 10), to: key.slice(0, 10) });
   return (
     <div className="standard-page">
       <div className="page-heading">
@@ -2982,6 +3066,9 @@ function Analytics({
         <div className="segmented">
           {[
             ['all', 'All time'],
+            ['today', 'Today'],
+            ['week', 'This Week'],
+            ['month', 'This Month'],
             ['7', '7 days'],
             ['30', '30 days'],
             ['90', '90 days'],
@@ -3002,18 +3089,18 @@ function Analytics({
               aria-label="Analytics start date"
               type="date"
               value={filter.from?.slice(0, 10) || ''}
-              onChange={(e) => onFilter({ from: e.target.value || undefined })}
+              onChange={(e) => onFilter({ period: undefined, from: e.target.value || undefined })}
             />
             <span>to</span>
             <input
               aria-label="Analytics end date"
               type="date"
               value={filter.to?.slice(0, 10) || ''}
-              onChange={(e) => onFilter({ to: e.target.value || undefined })}
+              onChange={(e) => onFilter({ period: undefined, to: e.target.value || undefined })}
             />
           </>
         )}
-        <span className="muted small-text">{snapshot.settings.timezone}</span>
+        <span className="muted small-text">Weeks start Monday</span>
       </div>
       <div className="metrics-strip analytics-metrics">
         <Metric
@@ -3022,8 +3109,15 @@ function Analytics({
           value={compact(u.total)}
           note={
             change === null
-              ? 'No comparable prior period'
-              : (change >= 0 ? '+' : '') + change.toFixed(1) + '% versus previous period'
+              ? !complete
+                ? 'Comparison unavailable: incomplete token categories'
+                : previous === 0
+                  ? 'Prior period has zero observed tokens'
+                  : 'No comparable prior period'
+              : (change >= 0 ? '+' : '') +
+                change.toFixed(1) +
+                '% · ' +
+                snapshot.reporting.comparison
           }
         />
         <Metric
@@ -3054,6 +3148,16 @@ function Analytics({
           note="Cache reads ÷ all input tokens"
         />
       </div>
+      {snapshot.previous_complete && (
+        <p className="small-note">
+          Complete prior calendar period: {n(snapshot.previous_complete.total)} observed tokens
+          {' · '}
+          {snapshot.reporting.previous_from && fmtDate(snapshot.reporting.previous_from)}
+          {' → '}
+          {snapshot.reporting.prior_complete_to && fmtDate(snapshot.reporting.prior_complete_to)}
+          {' (end exclusive). Percentage comparisons use matching progress to date.'}
+        </p>
+      )}
       <section className="panel trend-panel">
         <SectionHeading eyebrow="OVER TIME" title="A little perspective">
           <div className="segmented small">
@@ -3076,22 +3180,31 @@ function Analytics({
           onClick={dayDrill}
         />
         <div className="chart-legend">
-          <span>
-            <i style={{ background: 'var(--amber)' }} />
-            Input
-          </span>
-          <span>
-            <i style={{ background: 'var(--mint)' }} />
-            Output
-          </span>
-          <span>
-            <i style={{ background: 'var(--purple)' }} />
-            Cache read
-          </span>
-          <span>
-            <i style={{ background: 'var(--blue)' }} />
-            Cache write
-          </span>
+          {metric === 'cost' ? (
+            <span>
+              <i style={{ background: 'var(--amber)' }} />
+              Estimated cost (USD)
+            </span>
+          ) : (
+            <>
+              <span>
+                <i style={{ background: 'var(--amber)' }} />
+                Input
+              </span>
+              <span>
+                <i style={{ background: 'var(--mint)' }} />
+                Output
+              </span>
+              <span>
+                <i style={{ background: 'var(--purple)' }} />
+                Cache read
+              </span>
+              <span>
+                <i style={{ background: 'var(--blue)' }} />
+                Cache write
+              </span>
+            </>
+          )}
           <span className="legend-hint">Click a day to explore sessions</span>
         </div>
       </section>
@@ -3132,44 +3245,6 @@ function Analytics({
             ))}
         </section>
       </div>
-      <section className="panel">
-        <SectionHeading eyebrow="CONSISTENCY, WITHOUT THE GUESSWORK" title="Activity calendar">
-          <span className="small-text muted">Observed daily usage</span>
-        </SectionHeading>
-        <div className="heatmap">
-          {snapshot.daily.map((d, i) => (
-            <button
-              key={d.key}
-              onClick={() => dayDrill(d.key)}
-              style={{
-                background:
-                  'color-mix(in srgb, var(--mint) ' +
-                  Math.max(8, (d.total / Math.max(1, ...snapshot.daily.map((x) => x.total))) * 80) +
-                  '%, var(--surface-raised))',
-              }}
-              title={d.label + ': ' + n(d.total) + ' tokens'}
-              aria-label={d.label + ': ' + n(d.total) + ' tokens'}
-            >
-              <span>{i % 7 === 0 ? d.label.slice(-5) : ''}</span>
-            </button>
-          ))}
-        </div>
-        <div className="heatmap-legend">
-          <span>Less</span>
-          {[10, 25, 45, 65, 85].map((a) => (
-            <i
-              key={a}
-              style={{
-                background: 'color-mix(in srgb, var(--mint) ' + a + '%, var(--surface-raised))',
-              }}
-            />
-          ))}
-          <span>More</span>
-        </div>
-        {snapshot.daily.length === 0 && (
-          <p className="small-note">Activity will appear when local usage is indexed.</p>
-        )}
-      </section>
       <div className="two-column-grid">
         <section className="panel">
           <SectionHeading eyebrow="DAILY RHYTHM" title="By hour of day" />
@@ -3191,21 +3266,17 @@ function Analytics({
         </section>
         <section className="panel">
           <SectionHeading eyebrow="TAKE A CLOSER LOOK" title="Highest-usage sessions" />
-          {snapshot.sessions
-            .slice()
-            .sort((a, b) => b.usage.total - a.usage.total)
-            .slice(0, 5)
-            .map((s) => (
-              <button key={s.id} className="ranking" onClick={() => onSession(s.id)}>
-                <ProviderIcon provider={s.provider} />
-                <div>
-                  <strong>{s.name}</strong>
-                  <span>{s.project}</span>
-                </div>
-                <b>{compact(s.usage.total)}</b>
-                <ChevronRight size={13} />
-              </button>
-            ))}
+          {snapshot.top_sessions.map((s) => (
+            <button key={s.id} className="ranking" onClick={() => onSession(s.id)}>
+              <ProviderIcon provider={s.provider} />
+              <div>
+                <strong>{s.name}</strong>
+                <span>{s.project}</span>
+              </div>
+              <b>{compact(s.usage.total)}</b>
+              <ChevronRight size={13} />
+            </button>
+          ))}
         </section>
       </div>
     </div>
@@ -3541,7 +3612,7 @@ function Compare({
   const chartRows = useMemo(() => {
     const records: Record<
       string,
-      { key: string; label: string; [series: string]: string | number }
+      { key: string; label: string; x: number; [series: string]: string | number }
     > = {};
     items.forEach((item, i) =>
       item.timeline.forEach((b) => {
@@ -3549,12 +3620,20 @@ function Compare({
         if (!records[key])
           records[key] = {
             key,
+            x: b.x ?? 0,
             label: alignment === 'elapsed' ? parseInt(b.key, 10) + ' min' : b.label,
           };
         records[key]['series' + i] = b.total;
       }),
     );
-    return Object.values(records).sort((a, b) => a.key.localeCompare(b.key));
+    return Object.values(records)
+      .map((row) => {
+        items.forEach((_, i) => {
+          row['series' + i] ??= 0;
+        });
+        return row;
+      })
+      .sort((a, b) => a.x - b.x);
   }, [items, alignment]);
   return (
     <div className="standard-page">
@@ -3804,7 +3883,15 @@ function Compare({
                     strokeDasharray="3 5"
                   />
                   <XAxis
-                    dataKey="label"
+                    dataKey="x"
+                    type="number"
+                    scale="linear"
+                    domain={['dataMin', 'dataMax']}
+                    tickFormatter={(x: number) =>
+                      alignment === 'elapsed'
+                        ? Math.round(x / 60000) + ' min'
+                        : fmtDate(new Date(x).toISOString())
+                    }
                     tick={{ fill: 'var(--text-muted)', fontSize: 10 }}
                     axisLine={false}
                     tickLine={false}
@@ -3815,7 +3902,15 @@ function Compare({
                     axisLine={false}
                     tickLine={false}
                   />
-                  <Tooltip content={<ChartTooltip />} />
+                  <Tooltip
+                    content={
+                      <ChartTooltip
+                        formatLabel={(x) =>
+                          chartRows.find((b) => b.x === Number(x))?.label || String(x)
+                        }
+                      />
+                    }
+                  />
                   {items.map((item, i) => (
                     <Line
                       isAnimationActive={false}

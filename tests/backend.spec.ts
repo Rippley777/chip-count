@@ -165,7 +165,7 @@ test('auto-review costs display inferred model pricing in the dashboard and insp
   page,
   request,
 }) => {
-  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { mkdtemp, writeFile, appendFile, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   const folder = await mkdtemp(join(tmpdir(), 'chip-count-review-test-'));
@@ -229,6 +229,39 @@ test('auto-review costs display inferred model pricing in the dashboard and insp
     await expect(page.locator('.inspector-stats')).toContainText('≈$0.01');
     await expect(page.locator('.inspector-stats')).toContainText('model inferred');
     await expect(page.locator('.session-row-main').first()).toContainText('≈$0.01');
+    await appendFile(
+      path,
+      [
+        { type: 'turn_context', timestamp, payload: { model: 'unknown-unpriced-fixture' } },
+        {
+          type: 'event_msg',
+          timestamp,
+          payload: {
+            type: 'token_count',
+            info: {
+              total_token_usage: {
+                input_tokens: 200000,
+                cached_input_tokens: 100000,
+                output_tokens: 2000,
+                reasoning_output_tokens: 1000,
+                total_tokens: 202000,
+              },
+            },
+          },
+        },
+      ]
+        .map((record) => JSON.stringify(record) + '\n')
+        .join(''),
+    );
+    await real('rescan');
+    await page
+      .locator('.sidebar')
+      .getByRole('button', { name: /^Analytics/ })
+      .click();
+    await page.getByRole('button', { name: 'Est. cost', exact: true }).click();
+    await expect(page.locator('.trend-panel')).toContainText('Partial estimate');
+    await expect(page.locator('.trend-panel')).toContainText('tokens unpriced');
+    await expect(page.locator('.trend-panel')).toContainText('auto-review estimates');
   } finally {
     if (sourceId) await real('source_remove', { id: sourceId });
     await rm(folder, { recursive: true, force: true });

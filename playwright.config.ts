@@ -12,7 +12,8 @@ export default defineConfig({
   reporter: 'list',
   webServer: {
     command: 'npm run dev',
-    url: 'http://127.0.0.1:1431',
+    // Wait for the Rust API behind Vite as well as the UI server.
+    url: 'http://127.0.0.1:1431/api/health',
     reuseExistingServer: true,
     timeout: 180000,
     env: { CHIP_COUNT_DATA_DIR: './artifacts/browser-index' },

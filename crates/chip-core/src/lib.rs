@@ -1,5 +1,6 @@
 //! Local, metadata-only accounting engine. No network access and no dependency on Tauri.
 mod analytics;
+mod calendar;
 mod demo;
 mod ingest;
 pub mod model;

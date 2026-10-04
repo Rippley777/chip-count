@@ -278,6 +278,15 @@ Export your usage data when you need it for:
 
 CSV and JSON export make your data yours outside Chip Count too.
 
+### Calendar reporting
+
+A fresh workspace detects the operating system's IANA timezone. Change **Settings → Reporting timezone** to override it; existing workspaces keep their saved zone. Today, This Week, and This Month resolve in Rust in that zone, from local midnight at the calendar start to the current instant. **Weeks start Monday.** The reporting timezone and actual range appear above the workspace pages. Date-only custom end dates include the whole local day; timestamp ends are exclusive, and a custom start without an end runs through now. Cards, charts, sessions, rankings, and exports use the same event filter: a session crossing midnight contributes only events inside the range.
+
+Calendar percentage comparisons use the previous calendar period at matching civil progress to date, capped at that period's end (for example, March 31 compared with complete February). The complete prior period is shown separately and is not the percentage baseline. The 7/30/90-day presets and custom ranges compare equal elapsed durations; all-time history has no preceding comparison. JSON and CSV exports include the resolved UTC boundaries, timezone, week start, and comparison boundaries.
+
+Daily charts include zero-use days with uniform civil-day spacing. Minute charts use actual elapsed instants, distinguish repeated DST minutes, and place zero-use minutes around sparse gaps. Token stacks include uncached input, output (including reasoning), cache reads, and cache writes; reasoning is a subset of output. Cost charts disclose partial coverage and inferred prices. Highest-usage sessions are ranked from the full filtered backend view before pagination.
+
+
 ---
 
 ## 🌗 Looks good after midnight
