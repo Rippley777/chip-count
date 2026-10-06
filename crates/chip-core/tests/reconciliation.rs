@@ -168,7 +168,7 @@ fn corrected_model_prices_existing_response_without_repricing_other_history() {
     assert_eq!(event["usage"]["unpriced_tokens"], 0);
     assert_eq!(event["usage"]["cost"], 0.000675);
     assert_eq!(event["ingested_at"], original_ingested);
-    assert_eq!(event["pricing_version"], "bundled-2026-10-03");
+    assert_eq!(event["pricing_version"], "bundled-2026-10-06-claude");
     assert!(event["warnings"]
         .as_array()
         .unwrap()

@@ -4366,3 +4366,61 @@ kbd {
   color: var(--text-muted);
   font-size: 10px;
 }
+/* Recovery and alternate chart controls remain reachable at every viewport size. */
+.recovery-screen {
+  max-width: 780px;
+  margin: 6vh auto;
+  padding: 28px;
+  color: var(--text);
+}
+.recovery-screen > img {
+  width: 48px;
+}
+.recovery-screen p {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.error-notice {
+  padding: 14px 18px;
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  margin: 12px;
+  background: var(--surface-raised);
+  color: var(--text);
+}
+.error-notice p {
+  margin: 8px 0;
+  line-height: 1.5;
+}
+.error-notice pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.chart-controls {
+  display: flex;
+  gap: 12px;
+  align-items: end;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.chart-controls .field {
+  flex: 1;
+  min-width: 120px;
+}
+.chart-controls .button {
+  margin-bottom: 2px;
+}
+.source-diagnostics {
+  margin: 12px 0;
+}
+.source-diagnostics code {
+  overflow-wrap: anywhere;
+}
+summary {
+  cursor: pointer;
+}
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
+}

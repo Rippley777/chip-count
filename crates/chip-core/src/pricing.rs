@@ -1,16 +1,35 @@
 use crate::{model::*, required, Engine};
 use anyhow::{Context, Result};
 use rusqlite::params;
-use serde_json::Value;
+use serde_json::{json, Value};
+
+// Standard API-equivalent USD per million tokens, verified against Anthropic's
+// pricing table on 2026-10-06. Keep this allowlist shared with snapshot matching.
+const CLAUDE_PRICES: &[(&str, f64, f64, f64, f64)] = &[
+    ("claude-fable-5-1", 10., 50., 0.25, 12.5),
+    ("claude-fable-5", 10., 50., 1., 12.5),
+    ("claude-mythos-5-1", 10., 50., 0.25, 12.5),
+    ("claude-mythos-5", 10., 50., 1., 12.5),
+    ("claude-opus-5-5", 4., 20., 0.2, 5.),
+    ("claude-opus-5", 5., 25., 0.5, 6.25),
+    ("claude-opus-4-8", 5., 25., 0.5, 6.25),
+    ("claude-opus-4-7", 5., 25., 0.5, 6.25),
+    ("claude-opus-4-6", 5., 25., 0.5, 6.25),
+    ("claude-opus-4-5", 5., 25., 0.5, 6.25),
+    ("claude-opus-4-1", 15., 75., 1.5, 18.75),
+    ("claude-opus-4", 15., 75., 1.5, 18.75),
+    ("claude-sonnet-5-5", 2., 10., 0.2, 2.5),
+    ("claude-sonnet-5", 2., 10., 0.2, 2.5),
+    ("claude-sonnet-4-6", 3., 15., 0.3, 3.75),
+    ("claude-sonnet-4-5", 3., 15., 0.3, 3.75),
+    ("claude-sonnet-4", 3., 15., 0.3, 3.75),
+    ("claude-haiku-4-5", 1., 5., 0.1, 1.25),
+    ("claude-3-5-haiku", 0.8, 4., 0.08, 1.),
+];
+const CLAUDE_CATALOG: &str = "bundled-2026-10-06-claude";
 impl Engine {
     pub(crate) fn seed_prices(&self) -> Result<()> {
         let models = [
-            ("claude-sonnet-4", 3., 15., 0.3, 3.75),
-            ("claude-sonnet-4-5", 3., 15., 0.3, 3.75),
-            ("claude-sonnet-4-6", 3., 15., 0.3, 3.75),
-            ("claude-opus-4-5", 5., 25., 0.5, 6.25),
-            ("claude-opus-4-6", 5., 25., 0.5, 6.25),
-            ("claude-haiku-4-5", 1., 5., 0.1, 1.25),
             ("gpt-5.3-codex", 1.75, 14., 0.175, 1.75),
             ("gpt-6-astra", 10., 50., 1., 12.5),
             ("gpt-6.1-sol", 2., 10., 0.1, 2.5),
@@ -27,7 +46,15 @@ impl Engine {
         // Already priced events and local rate overrides keep their original versions.
         self.db.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
-            for (model, input, output, cache_read, cache_write) in models {
+            let mut recover_models = vec![];
+            // Also recover dated snapshots left behind by older exact-model recovery.
+            // Run once even when the family rate was already installed.
+            if self.get("config", "claude_catalog")? != Some(json!(CLAUDE_CATALOG)) {
+                recover_models.extend(CLAUDE_PRICES.iter().map(|p| p.0));
+            }
+            for (model, input, output, cache_read, cache_write) in
+                models.into_iter().chain(CLAUDE_PRICES.iter().copied())
+            {
                 if self.get("prices", model)?.is_some() {
                     continue;
                 }
@@ -39,6 +66,8 @@ impl Engine {
                     cache_write,
                     version: if model == "codex-auto-review" {
                         "inferred-2026-10-03-auto-review-luna"
+                    } else if model.starts_with("claude-") {
+                        CLAUDE_CATALOG
                     } else if modern_openai(model) {
                         "bundled-2026-10-03-openai-v2"
                     } else {
@@ -53,27 +82,39 @@ impl Engine {
                         "https://developers.openai.com/api/docs/pricing"
                     }
                     .into(),
-                    retrieved_at: "2026-10-03T00:00:00Z".into(),
+                    retrieved_at: if model.starts_with("claude-") {
+                        "2026-10-06T00:00:00Z"
+                    } else {
+                        "2026-10-03T00:00:00Z"
+                    }.into(),
                     overridden: false,
                     inferred: model == "codex-auto-review",
                 };
                 self.store_price(&price)?;
-                self.recover_unpriced_model(model)?;
+                recover_models.push(model);
             }
+            if !recover_models.is_empty() {
+                self.recover_unpriced_models(&recover_models)?;
+            }
+            self.put("config", "claude_catalog", &json!(CLAUDE_CATALOG))?;
             Ok(())
         })();
         self.db
             .execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
         result
     }
-    fn recover_unpriced_model(&self, model: &str) -> Result<()> {
+    fn recover_unpriced_models(&self, models: &[&str]) -> Result<()> {
         let mut statement = self.db.prepare(
-            "SELECT data FROM events WHERE model=?1 AND json_extract(data,'$.pricing_version')='unpriced'",
+            "SELECT model,data FROM events WHERE json_extract(data,'$.pricing_version')='unpriced'",
         )?;
-        let rows = statement.query_map([model], |r| r.get::<_, String>(0))?;
+        let rows =
+            statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut events = vec![];
         for row in rows {
-            events.push(serde_json::from_str::<Event>(&row?)?);
+            let (model, data) = row?;
+            if models.contains(&model.as_str()) || models.contains(&pricing_alias(&model)) {
+                events.push(serde_json::from_str::<Event>(&data)?);
+            }
         }
         drop(statement);
         for mut event in events {
@@ -99,7 +140,7 @@ impl Engine {
                 .as_f64()
                 .filter(|x| x.is_finite() && *x >= 0.0 && *x <= 1_000_000.0)
                 .with_context(|| {
-                    format!("{name} must be a finite nonnegative price per million tokens")
+                    format!("{name} must be a finite nonnegative price per million tokens, at most 1,000,000 USD")
                 })
         };
         self.store_price(&Price {
@@ -241,14 +282,7 @@ fn modern_openai(model: &str) -> bool {
 }
 fn pricing_alias(model: &str) -> &str {
     // Dated Claude snapshots share a verified family price, preserving the original event model.
-    for alias in [
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-5",
-        "claude-opus-4-6",
-        "claude-opus-4-5",
-        "claude-haiku-4-5",
-        "claude-sonnet-4",
-    ] {
+    for &(alias, ..) in CLAUDE_PRICES {
         if model == alias
             || model.strip_prefix(alias).is_some_and(|s| {
                 s.starts_with('-')
@@ -276,6 +310,47 @@ mod tests {
             "reported":true, "warnings":[], "duration_ms":null
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn claude_catalog_prices_current_models_and_dated_snapshots() {
+        let engine = Engine::demo().unwrap();
+        for (model, nano) in [
+            ("claude-sonnet-5-5", 14_700_000),
+            ("claude-sonnet-5", 14_700_000),
+            ("claude-opus-5-5", 29_200_000),
+            ("claude-opus-5", 36_750_000),
+            ("claude-opus-4-8", 36_750_000),
+            ("claude-opus-4-7", 36_750_000),
+            ("claude-fable-5-1", 72_750_000),
+            ("claude-mythos-5-1", 72_750_000),
+            ("claude-fable-5", 73_500_000),
+            ("claude-mythos-5", 73_500_000),
+            ("claude-opus-4-1-20250805", 110_250_000),
+            ("claude-opus-4-20250514", 110_250_000),
+            ("claude-3-5-haiku-20241022", 5_880_000),
+            ("claude-haiku-4-5-20251001", 7_350_000),
+            ("claude-sonnet-4-5-20250929", 22_050_000),
+        ] {
+            let mut e = event(model, Usage::tokens(1000, 1000, 1000, 1000, 0));
+            engine.apply_price(&mut e).unwrap();
+            assert_eq!(e.model, model, "Keep the source model for provenance");
+            assert_eq!(e.usage.nano, nano, "{model}");
+            assert_eq!(e.usage.unpriced_tokens, 0, "{model}");
+            assert_eq!(e.pricing_version.as_deref(), Some(CLAUDE_CATALOG));
+        }
+        for model in [
+            "claude-sonnet-5-50",
+            "claude-sonnet-5-5-custom",
+            "claude-sonnet-6",
+            "claude-sonnet-4-5-2025092",
+            "claude-sonnet-4-5-abcdefgh",
+        ] {
+            let mut e = event(model, Usage::tokens(100, 10, 0, 0, 0));
+            engine.apply_price(&mut e).unwrap();
+            assert_eq!(e.usage.unpriced_tokens, 110, "{model}");
+            assert_eq!(e.usage.nano, 0);
+        }
     }
 
     #[test]

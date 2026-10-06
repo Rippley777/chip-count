@@ -2,6 +2,10 @@
 mod analytics;
 mod calendar;
 mod demo;
+mod error;
+mod recovery;
+pub use error::UserError;
+pub use recovery::LocalIndex;
 mod ingest;
 pub mod model;
 mod parser;
@@ -34,6 +38,9 @@ impl Engine {
     }
     /// No environment or home discovery; every external source requires a native grant.
     pub fn sandboxed(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut engine = Self::init(Connection::open(path)?, false)?;
         engine.source_grants = Some(HashMap::new());
         Ok(engine)
@@ -55,6 +62,7 @@ impl Engine {
     /// Commit a native selection and its bookmark together, before any scan.
     pub fn save_bookmarked_source(&self, args: Value, bookmark: &[u8]) -> Result<()> {
         let id = required(&args, "id")?.to_owned();
+        self.preserve_source_change(&args)?;
         self.db.execute_batch("SAVEPOINT native_source")?;
         let result = self
             .save_source(args, false)
@@ -82,6 +90,55 @@ impl Engine {
         Self::init(Connection::open(path)?, false)
     }
     fn init(db: Connection, is_demo: bool) -> Result<Self> {
+        // Validate and preserve an existing database before schema/price upgrades write it.
+        let integrity: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        if integrity != "ok" {
+            return Err(UserError::new(
+                "index_corrupt",
+                "The local index failed its integrity check.",
+                "Preserve a recovery copy and restore a known-good backup. The original is kept.",
+                integrity,
+            )
+            .into());
+        }
+        let existing: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='schema_version')",
+            [],
+            |r| r.get(0),
+        )?;
+        let revision = "2026-10-04-recovery-v1";
+        let table_count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !existing && table_count > 0 {
+            return Err(UserError::new("index_corrupt", "This file has no Chip Count index schema.", "Preserve a recovery copy and select a known-good Chip Count backup. This file has been kept.", "schema_version is missing").into());
+        }
+        if existing {
+            let version: i64 =
+                db.query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                    r.get(0)
+                })?;
+            if version != 1 {
+                return Err(UserError::new("index_unavailable", "This index uses an unsupported schema version.", "Open it with a compatible Chip Count version. Preserve a recovery copy before restoring a backup.", format!("Schema version: {version}")).into());
+            }
+            let current: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM config WHERE id='index_revision' AND data=?1)",
+                [json!(revision).to_string()],
+                |r| r.get(0),
+            )?;
+            if let Some(path) = db.path().filter(|p| !p.is_empty() && !current) {
+                let backup = PathBuf::from(format!(
+                    "{path}.before-upgrade-{}.sqlite",
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                ));
+                db.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
+                    .context(
+                        "Could not preserve the index before opening; no upgrade was applied",
+                    )?;
+            }
+        }
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
           CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL); INSERT INTO schema_version SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM schema_version);
           CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -107,6 +164,7 @@ impl Engine {
             e.put("config", "settings", &settings_default())?;
         }
         e.seed_prices()?;
+        e.put("config", "index_revision", &json!(revision))?;
         Ok(e)
     }
     pub(crate) fn get(&self, table: &str, id: &str) -> Result<Option<Value>> {
@@ -121,6 +179,41 @@ impl Engine {
             .optional()?;
         s.map(|s| serde_json::from_str(&s).map_err(Into::into))
             .transpose()
+    }
+    /// A consistent SQLite snapshot includes WAL changes and all local metadata.
+    pub fn preserve(&self, reason: &str) -> Result<PathBuf> {
+        let backup = self
+            .db
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                PathBuf::from(format!(
+                    "{p}.{reason}-{}.sqlite",
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                ))
+            })
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!(
+                    "chip-count-{reason}-{}.sqlite",
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                ))
+            });
+        self.db
+            .execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
+            .context("Could not preserve the index; recovery was not started")?;
+        std::fs::File::open(&backup)?.sync_all()?;
+        if let Some(path) = self.db.path().filter(|p| !p.is_empty()) {
+            let notifications = Path::new(path)
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("notified-alerts.json");
+            if notifications.exists() {
+                std::fs::copy(notifications, backup.with_extension("notifications.json")).context(
+                    "Could not preserve notification metadata; recovery was not started",
+                )?;
+            }
+        }
+        Ok(backup)
     }
     pub(crate) fn put(&self, table: &str, id: &str, v: &Value) -> Result<()> {
         self.db.execute(&format!("INSERT INTO {table}(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data"),params![id,v.to_string()])?;
@@ -251,14 +344,10 @@ impl Engine {
                     .is_some_and(|e| s["exclusions"] != *e)
         });
         if changed {
-            self.db
-                .execute("DELETE FROM origins WHERE source_id=?1", [&id])?;
+            // Reselecting a relocated root must not discard cached history or notes
+            // when the replacement folder has only part of the original logs.
             self.db
                 .execute("DELETE FROM files WHERE source_id=?1", [&id])?;
-            self.db.execute(
-                "DELETE FROM events WHERE id NOT IN(SELECT event_id FROM origins)",
-                [],
-            )?;
         }
         let mut source=old.unwrap_or_else(||json!({"id":id,"files":0,"recognized":0,"ignored":0,"warnings":0,"last_read":null,"last_activity":null}));
         if changed {
@@ -283,7 +372,43 @@ impl Engine {
             "disabled"
         });
         source["message"] = Value::Null;
+        if let Some(backup) = self.get("config", &format!("source_backup:{id}"))? {
+            source["recovery_backup"] = backup;
+        }
         self.put("sources", &id, &source)
+    }
+    fn preserve_source_change(&self, args: &Value) -> Result<Option<PathBuf>> {
+        let provider = required(args, "provider")?;
+        let path = Path::new(required(args, "path")?);
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let id = args["id"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| hash(&format!("{provider}:{}", canonical.display())));
+        let changed = self.get("sources", &id)?.is_some_and(|s| {
+            s["path"] != json!(canonical)
+                || s["provider"] != provider
+                || args
+                    .get("exclusions")
+                    .is_some_and(|e| s["exclusions"] != *e)
+        });
+        if !changed {
+            return Ok(None);
+        }
+        if !self.is_demo
+            && (!path.exists()
+                || (if path.is_dir() {
+                    std::fs::read_dir(path).map(|_| ())
+                } else {
+                    std::fs::File::open(path).map(|_| ())
+                })
+                .is_err())
+        {
+            return Err(UserError::new("access_unavailable", "The replacement source cannot be read.", "Reconnect or reselect an accessible source and retry. Your existing source, history and notes are retained.", path.display().to_string()).into());
+        }
+        let backup = self.preserve("before-source-change")?;
+        self.put("config", &format!("source_backup:{id}"), &json!(backup))?;
+        Ok(Some(backup))
     }
     pub fn dispatch(&mut self, command: &str, args: Value) -> Result<Value> {
         match command {
@@ -326,9 +451,10 @@ impl Engine {
                 Ok(json!({"ok":true}))
             }
             "source_save" => {
+                let backup = self.preserve_source_change(&args)?;
                 self.save_source(args, false)?;
                 self.reconcile()?;
-                Ok(json!({"ok":true}))
+                Ok(json!({"ok":true,"backup":backup}))
             }
             "source_remove" => {
                 self.db.execute(
@@ -340,8 +466,31 @@ impl Engine {
                 Ok(json!({"ok":true}))
             }
             "rescan" => {
+                let mut backup = None;
                 if args["rebuild"] == true {
-                    self.db.execute_batch("BEGIN; DELETE FROM files;DELETE FROM events;DELETE FROM origins;DELETE FROM sessions;DELETE FROM markers;DELETE FROM limits; COMMIT;")?;
+                    backup = Some(self.preserve("before-rebuild")?);
+                    // Do not clear history when a root is disconnected or access was revoked.
+                    for source in self.list("sources")? {
+                        if !self.is_demo && source["enabled"] == true {
+                            let path = Path::new(source["path"].as_str().unwrap_or(""));
+                            if !self.source_authorized(&source)
+                                || !path.exists()
+                                || (if path.is_dir() {
+                                    std::fs::read_dir(path).map(|_| ())
+                                } else {
+                                    std::fs::File::open(path).map(|_| ())
+                                })
+                                .is_err()
+                            {
+                                return Err(UserError::new("access_unavailable", "A source cannot be read; rebuild was not started.", "Reconnect or reselect the source in Sources and retry. Existing history and local metadata are retained.", format!("Source: {}\nBackup: {}", path.display(), backup.as_ref().unwrap().display())).into());
+                            }
+                        }
+                    }
+                    // Re-read checkpoints, retaining observations and their original pricing.
+                    // Missing logs must never silently remove the only indexed history.
+                    self.db.execute_batch("DELETE FROM files;")?;
+                    self.db
+                        .execute("DELETE FROM config WHERE id LIKE 'diagnostics:%'", [])?;
                     if self.is_demo {
                         self.populate_demo()?;
                     } else {
@@ -356,7 +505,7 @@ impl Engine {
                     }
                 }
                 self.reconcile()?;
-                Ok(json!({"ok":true}))
+                Ok(json!({"ok":true,"backup":backup}))
             }
             "settings_save" => {
                 let mut s = self.settings()?;

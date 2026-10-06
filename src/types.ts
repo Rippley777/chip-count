@@ -82,6 +82,8 @@ export interface Source {
   recognized: number;
   ignored: number;
   warnings: number;
+  diagnostics?: { path: string; line: number; category: string; message: string }[];
+  recovery_backup?: string;
   last_read: string | null;
   last_activity: string | null;
   message: string | null;
@@ -272,7 +274,9 @@ export interface Commands {
     result: { ok: boolean };
   };
   source_remove: { args: { id: string }; result: { ok: boolean } };
-  rescan: { args: { rebuild?: boolean }; result: { ok: boolean } };
+  rescan: { args: { rebuild?: boolean }; result: { ok: boolean; backup?: string } };
+  index_retry: { args: Record<string, never>; result: { ok: boolean; backup?: string } };
+  index_preserve: { args: Record<string, never>; result: { ok: boolean; backup: string } };
   settings_save: { args: { settings: Partial<Settings> }; result: { ok: boolean } };
   budget_save: {
     args: {

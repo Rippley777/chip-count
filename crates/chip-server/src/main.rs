@@ -1,6 +1,6 @@
 //! Development-only loopback bridge. Production embeds the same Engine in Tauri.
 use anyhow::{bail, Context, Result};
-use chip_core::Engine;
+use chip_core::{LocalIndex, UserError};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -30,8 +30,8 @@ fn empty_object() -> Value {
     json!({})
 }
 struct State {
-    real: Arc<Mutex<Engine>>,
-    demo: Arc<Mutex<Engine>>,
+    real: Arc<Mutex<LocalIndex>>,
+    demo: Arc<Mutex<LocalIndex>>,
     paused: Arc<AtomicBool>,
     wake: mpsc::SyncSender<()>,
 }
@@ -170,12 +170,14 @@ fn monitor(state: Arc<State>, receiver: mpsc::Receiver<()>) {
             loop {
                 if !state.paused.load(Ordering::Relaxed) {
                     if let Ok(mut engine) = state.real.lock() {
-                        if engine.reconcile().is_err() {
+                        if engine.engine().and_then(|e| e.reconcile()).is_err() {
                             eprintln!(
                                 "Index reconciliation failed. Check Sources for diagnostics."
                             );
                         }
-                        watch_roots(&mut watcher, &mut roots, engine.watch_roots());
+                        if let Ok(engine) = engine.engine() {
+                            watch_roots(&mut watcher, &mut roots, engine.watch_roots());
+                        }
                     }
                 }
                 if receiver.recv_timeout(Duration::from_secs(3)).is_ok() {
@@ -217,13 +219,21 @@ fn handle(mut request: Request, state: &State) {
     let body = match read_json(&mut request) {
         Ok(v) => v,
         Err(e) => {
-            respond(request, 400, json!({"error":e.to_string()}));
+            respond(
+                request,
+                400,
+                json!({"error":UserError::new("invalid_input", "The request could not be read.", "Send valid JSON within the request size limit and retry.", e.to_string())}),
+            );
             return;
         }
     };
     if request.url() == "/api/monitoring" {
         let Some(paused) = body["paused"].as_bool() else {
-            respond(request, 400, json!({"error":"paused must be a boolean"}));
+            respond(
+                request,
+                400,
+                json!({"error":UserError::new("invalid_input", "paused must be a boolean", "Use true or false and retry.", "monitoring")}),
+            );
             return;
         };
         state.paused.store(paused, Ordering::Relaxed);
@@ -237,7 +247,7 @@ fn handle(mut request: Request, state: &State) {
             respond(
                 request,
                 400,
-                json!({"error":"Expected {command, args, demo}."}),
+                json!({"error":UserError::new("invalid_input", "Expected {command, args, demo}.", "Correct the request envelope and retry.", "dispatch")}),
             );
             return;
         }
@@ -250,8 +260,13 @@ fn handle(mut request: Request, state: &State) {
     let result = match engine.lock() {
         Ok(mut engine) => engine
             .dispatch(&dispatch.command, dispatch.args)
-            .map_err(|e| e.to_string()),
-        Err(_) => Err("The local index is unavailable; restart the development server.".into()),
+            .map_err(|e| UserError::from_error(&dispatch.command, &e)),
+        Err(_) => Err(UserError::new(
+            "index_unavailable",
+            "The index worker stopped.",
+            "Restart Chip Count and retry.",
+            "Index mutex was poisoned",
+        )),
     };
     match result {
         Ok(value) => {
@@ -274,8 +289,8 @@ fn main() -> Result<()> {
     // Bind before opening the database to avoid two servers indexing the same file.
     let server =
         Server::http(ADDRESS).map_err(|e| anyhow::anyhow!("Could not bind {ADDRESS}: {e}"))?;
-    let real = Arc::new(Mutex::new(Engine::open(&db)?));
-    let demo = Arc::new(Mutex::new(Engine::demo()?));
+    let real = Arc::new(Mutex::new(LocalIndex::open(&db, false)));
+    let demo = Arc::new(Mutex::new(LocalIndex::demo()?));
     let (wake, receiver) = mpsc::sync_channel(1);
     let state = Arc::new(State {
         real,

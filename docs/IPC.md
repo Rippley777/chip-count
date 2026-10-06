@@ -10,7 +10,7 @@ Commands:
 - `annotate`: `{id, alias?, notes?, tags?: string[], pinned?: boolean}` -> `{ok:true}`
 - `source_save`: `{id?, provider:'claude'|'codex', label, path, enabled, exclusions?:string[]}` -> `{ok:true}`
 - `source_remove`: `{id}` -> `{ok:true}`
-- `rescan`: `{rebuild?:boolean}` -> `{ok:true}`. Rebuild removes derived usage only, preserves sources, annotation, settings; never source files.
+- `rescan`: `{rebuild?:boolean}` -> `{ok:true, backup?:string}`. Rebuild first saves a consistent SQLite snapshot and verifies enabled source access. It resets read checkpoints and diagnostics, retaining observations, their pricing versions, annotations, projects, sources, settings, prices and budgets. Missing roots refuse rebuild. Source files stay read-only.
 - `settings_save`: `{settings: Partial<Settings>}` -> `{ok:true}`
 - `budget_save`: `{id?, name, amount, unit:'usd'|'tokens', period:'day'|'month'|'5h'|'window', window_minutes?:number, project?:string, threshold:number}` -> `{ok:true}`
 - `budget_remove`: `{id}` -> `{ok:true}`
@@ -27,3 +27,17 @@ Exact shared response shapes are in src/types.ts. Coordinate extensions there be
 Budget responses expose `unpriced_tokens` and `unknown_fields`. Known values are lower bounds when coverage is partial; forecasts are suppressed when the relevant token or cost total is incomplete.
 
 Daily buckets include zero-use civil dates with numeric `x` coordinates spaced one day apart. Minute timelines expose epoch milliseconds in `x` (elapsed milliseconds for elapsed comparisons), ordered by actual time including repeated DST minutes. Sparse minute gaps include zero buckets at their edges. JSON exports include `reporting`; CSV appends `reporting_range_json`.
+
+Recoverable IPC errors are serialized objects: `{category, message, next_steps, diagnostics}`. Native invocations reject with this object; the development bridge returns HTTP 400 with `{error: <object>}`. Categories include `invalid_input`, `access_unavailable`, `index_unavailable`, `index_corrupt`, `save_failed`, and `restore_failed`; frontend transport failures use `service_unavailable`. Messages and next steps are displayed persistently, including inside an open edit dialog. Diagnostics never include transcript text.
+
+`LocalIndex` supports an unopened state so failure to create/open/validate an index does not abort native setup. A native recovery alert explains the failure and React offers recovery controls. Host dispatch adds `index_retry: {} -> {ok:true, backup?:string}` and `index_preserve: {} -> {ok:true, backup:string}`. Retry preserves unopened existing files before attempting to open them; it never deletes or silently replaces it. Readable indexes are preserved with `VACUUM INTO`, including committed WAL changes. Unreadable indexes are copied with their WAL/SHM/journal and notification metadata into a new recovery directory. SQLite preservation snapshots are synced before recovery continues.
+
+Native-only `restore_index: {} -> {restored:boolean, backup?:string}` selects a SQLite backup with a native panel and, in the sandbox, holds the selected URL scope. It accepts no path from IPC. It is allowed only while the index is unopened. It checks integrity, compatible schema and required metadata tables, validates a staged copy, preserves the original files, then atomically installs the staged database. Cancellation returns `{restored:false}`. Notes created after the selected backup remain in the preserved original; recovery never claims to merge unreadable notes. Index revisions take a preservation snapshot before applying schema/price updates; compatible launches do not create repeated upgrade backups.
+
+Source diagnostics are bounded to 12 unique metadata records per source: `{category, path, line, message}`. Malformed complete JSONL lines are skipped and reported with correction/rebuild guidance. Incomplete final lines retain their checkpoint and are retried automatically. I/O failures are reported in Sources; database failures propagate to index recovery.
+
+Native `save_export` returns `{saved:false}` on cancellation and `{saved:true,path}` on success. Export writes a temporary file and renames it after a successful write/sync, retaining a previous destination on failure. Source folders, JSONL paths and the private index directory cannot be export destinations. Cancellation preserves export options and returns keyboard focus to the export control.
+
+Native menus extend Tauri's default Edit/Window/Services menu. Settings uses Cmd/Ctrl-comma; Help and Source diagnostics dispatch `navigate` to the main window. Session row buttons support arrows, Home/End and Page Up/Down across the virtualized list, with paging buttons using the configured limit. Dialogs restore focus to their opening control (or the active page when the opener was removed). Interactive chart dates and brush intervals also expose selectors and submit buttons.
+
+Reselecting a changed source saves a preservation snapshot before changing its path/provider/exclusions or native bookmark. An unreadable replacement is refused without changing the current source. Read checkpoints reset; existing observations and annotations remain available even if the selected folder contains only part of the original logs. The source record exposes `recovery_backup` for diagnostics.

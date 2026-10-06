@@ -497,3 +497,132 @@ fn multi_session_jsonl_import_retains_each_session_metadata() {
             .unwrap();
     }
 }
+
+#[test]
+fn latest_claude_sonnet_prices_real_jsonl_and_exports_disjoint_cache_costs() {
+    let mut f = Fixture::new();
+    let log = f.logs.join("sonnet.jsonl");
+    let mut record = claude("sonnet", "latest", 1000, 2000, 0);
+    record["message"]["model"] = json!("claude-sonnet-5-5");
+    record["message"]["usage"]["cache_read_input_tokens"] = json!(3000);
+    record["message"]["usage"]["cache_creation_input_tokens"] = json!(4000);
+    write(&log, &[record]);
+    f.scan("claude");
+    let totals = f.snapshot()["totals"].clone();
+    assert_eq!(totals["total"], 10000);
+    assert_eq!(totals["unpriced_tokens"], 0);
+    // $0.002 input + $0.020 output + $0.0006 reads + $0.010 writes.
+    assert!((totals["cost"].as_f64().unwrap() - 0.0326).abs() < 1e-10);
+    f.reopen();
+    f.engine.reconcile().unwrap();
+    assert_eq!(f.snapshot()["totals"], totals);
+    let exported = f
+        .engine
+        .dispatch("export", json!({"format":"json"}))
+        .unwrap();
+    let data: Value = serde_json::from_str(exported["content"].as_str().unwrap()).unwrap();
+    assert_eq!(data["totals"], totals);
+    assert_eq!(data["events"][0]["model"], "claude-sonnet-5-5");
+    assert_eq!(
+        data["events"][0]["pricing_version"],
+        "bundled-2026-10-06-claude"
+    );
+}
+
+#[test]
+fn claude_catalog_upgrade_recovers_unpriced_aliases_and_preserves_history_and_overrides() {
+    let mut f = Fixture::new();
+    let log = f.logs.join("claude-upgrade.jsonl");
+    let models = [
+        "claude-sonnet-5-5",
+        "claude-opus-4-1-20250805",
+        "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4-6",
+        "claude-sonnet-5-5", // Unsupported cache duration must still be unpriced.
+        "claude-sonnet-5-5", // Unsupported fast mode must still be unpriced.
+        "claude-unknown-model",
+    ];
+    let records: Vec<_> = models
+        .iter()
+        .enumerate()
+        .map(|(i, model)| {
+            let mut record = claude("upgrade", &format!("request-{i}"), 100, 10, i as i64);
+            record["message"]["model"] = json!(model);
+            if i == 4 {
+                record["message"]["usage"]["cache_creation_input_tokens"] = json!(1);
+                record["message"]["usage"]["cache_creation"] =
+                    json!({"ephemeral_1h_input_tokens":1});
+            }
+            if i == 5 {
+                record["message"]["usage"]["speed"] = json!("fast");
+            }
+            record
+        })
+        .collect();
+    write(&log, &records);
+    f.scan("claude");
+    f.engine.dispatch("pricing_save", json!({"model":"claude-sonnet-4-5","input":10,"output":30,"cache_read":1,"cache_write":12})).unwrap();
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    // Simulate the shipped catalog and an earlier missed dated-snapshot recovery.
+    conn.execute("DELETE FROM config WHERE id='claude_catalog'", [])
+        .unwrap();
+    conn.execute(
+        "DELETE FROM prices WHERE id IN ('claude-sonnet-5-5','claude-opus-4-1')",
+        [],
+    )
+    .unwrap();
+    conn.execute("UPDATE events SET nano=0,data=json_set(data,'$.pricing_version','unpriced','$.usage.cost',0,'$.usage.unpriced_tokens',json_extract(data,'$.usage.total')) WHERE model!='claude-sonnet-4-6'", []).unwrap();
+    conn.execute("UPDATE events SET data=json_set(data,'$.pricing_version','bundled-2026-10-03') WHERE model='claude-sonnet-4-6'", []).unwrap();
+    let before: String = conn
+        .query_row(
+            "SELECT data FROM events WHERE model='claude-sonnet-4-6'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let override_before: String = conn
+        .query_row(
+            "SELECT data FROM prices WHERE id='claude-sonnet-4-5'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    f.reopen();
+    let after: String = conn
+        .query_row(
+            "SELECT data FROM events WHERE model='claude-sonnet-4-6'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let override_after: String = conn
+        .query_row(
+            "SELECT data FROM prices WHERE id='claude-sonnet-4-5'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(before, after, "Already priced history must not change");
+    assert_eq!(override_before, override_after);
+    for (model, nano) in [
+        ("claude-sonnet-5-5", 300_000),
+        ("claude-opus-4-1-20250805", 2_250_000),
+        ("claude-sonnet-4-5-20250929", 1_300_000),
+    ] {
+        let (actual, unpriced): (i64, u64) = conn.query_row(
+            "SELECT nano,json_extract(data,'$.usage.unpriced_tokens') FROM events WHERE model=?1 ORDER BY timestamp LIMIT 1", [model], |r| Ok((r.get(0)?,r.get(1)?))
+        ).unwrap();
+        assert_eq!(actual, nano, "{model}");
+        assert_eq!(unpriced, 0, "{model}");
+    }
+    let totals = f.snapshot()["totals"].clone();
+    assert_eq!(totals["total"], 771);
+    assert_eq!(totals["unpriced_tokens"], 331);
+    f.reopen();
+    f.engine.reconcile().unwrap();
+    assert_eq!(
+        f.snapshot()["totals"],
+        totals,
+        "Restart must not double count or reprice"
+    );
+}

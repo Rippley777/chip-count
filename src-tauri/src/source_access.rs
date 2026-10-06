@@ -24,7 +24,15 @@ unsafe extern "C" {
     fn chip_release(handle: *mut c_void);
     fn chip_free(value: *mut c_char);
     fn chip_save_panel(filename: *const c_char) -> *mut c_void;
+    fn chip_restore_panel() -> *mut c_void;
     fn chip_reveal(path: *const c_char);
+}
+pub fn restore_panel() -> Result<Option<Scope>, String> {
+    let handle = unsafe { chip_restore_panel() };
+    if handle.is_null() {
+        return Ok(None);
+    }
+    Scope::from_handle(handle, cfg!(feature = "app-store")).map(Some)
 }
 unsafe fn take_string(raw: *mut c_char) -> Result<String, String> {
     if raw.is_null() {

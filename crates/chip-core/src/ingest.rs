@@ -169,9 +169,14 @@ impl Engine {
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        // Storage failures need IPC recovery; only source I/O is skippable.
+                        if error.downcast_ref::<std::io::Error>().is_none() {
+                            return Err(error);
+                        }
                         inaccessible += 1;
                         source["warnings"] = json!(source["warnings"].as_u64().unwrap_or(0) + 1);
+                        self.source_diagnostic(&id, &path, 0, "access_unavailable", "Read failed. Check permissions, reconnect the volume, or reselect this source.")?;
                     }
                 }
             }
@@ -181,7 +186,13 @@ impl Engine {
             if checked {
                 source["last_read"] = json!(now());
             }
-            source["status"] = json!(if inaccessible > 0 || traversal_limit.is_some() {
+            source["diagnostics"] = self
+                .get("config", &format!("diagnostics:{id}"))?
+                .unwrap_or(json!([]));
+            source["status"] = json!(if inaccessible > 0
+                || traversal_limit.is_some()
+                || source["warnings"].as_u64().unwrap_or(0) > 0
+            {
                 "partial"
             } else if partial {
                 "indexing"
@@ -200,6 +211,8 @@ impl Engine {
                 ))
             } else if partial {
                 json!("Indexing in bounded batches; remaining complete records will be read on the next pass.")
+            } else if source["warnings"].as_u64().unwrap_or(0) > 0 {
+                json!("Some records could not be indexed. Inspect the file and line diagnostics below; correct the source JSONL, then rebuild to re-read skipped records. Original logs and indexed notes are kept.")
             } else {
                 Value::Null
             };
@@ -345,7 +358,10 @@ impl Engine {
                             self.put("limits", &id, &limit)?;
                         }
                     }
-                    Err(_) => warnings += 1,
+                    Err(_) => {
+                        warnings += 1;
+                        self.source_diagnostic(source_id, path.as_path(), line, "malformed_jsonl", "Invalid JSON record skipped. Correct this line in the source, then rebuild to re-read it. Incomplete trailing records are retried automatically.")?;
+                    }
                 }
             }
             if !state.session.id.is_empty() && !state.session.first_at.is_empty() {
@@ -372,6 +388,28 @@ impl Engine {
             },
             true,
         ))
+    }
+    fn source_diagnostic(
+        &self,
+        id: &str,
+        path: &Path,
+        line: u64,
+        category: &str,
+        message: &str,
+    ) -> Result<()> {
+        let key = format!("diagnostics:{id}");
+        let mut diagnostics = self.get("config", &key)?.unwrap_or(json!([]));
+        let rows = diagnostics
+            .as_array_mut()
+            .context("Stored source diagnostics are invalid")?;
+        let row = json!({"path":path,"line":line,"category":category,"message":message});
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+        if rows.len() > 12 {
+            rows.remove(0);
+        }
+        self.put("config", &key, &diagnostics)
     }
     pub(crate) fn merge_session(&self, new: &SessionMeta) -> Result<()> {
         let mut value = new.clone();

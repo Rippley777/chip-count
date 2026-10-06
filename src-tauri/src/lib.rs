@@ -1,5 +1,5 @@
 //! The desktop shell owns OS integration; all accounting lives in chip-core.
-use chip_core::Engine;
+use chip_core::{LocalIndex, UserError};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,7 +19,6 @@ use tauri::{
 };
 #[cfg(all(feature = "launch-agent", not(feature = "app-store")))]
 use tauri_plugin_autostart::ManagerExt;
-#[cfg(not(target_os = "macos"))]
 use tauri_plugin_dialog::DialogExt;
 #[cfg(target_os = "macos")]
 mod source_access;
@@ -38,8 +37,8 @@ fn empty_object() -> Value {
 }
 
 struct DesktopState {
-    real: Arc<Mutex<Engine>>,
-    demo: Arc<Mutex<Engine>>,
+    real: Arc<Mutex<LocalIndex>>,
+    demo: Arc<Mutex<LocalIndex>>,
     paused: Arc<AtomicBool>,
     stopping: AtomicBool,
     close_to_tray: Arc<AtomicBool>,
@@ -50,7 +49,7 @@ struct DesktopState {
 }
 
 #[tauri::command]
-async fn dispatch(app: AppHandle, request: Request) -> Result<Value, String> {
+async fn dispatch(app: AppHandle, request: Request) -> Result<Value, UserError> {
     let state = app.state::<DesktopState>();
     let engine = if request.demo {
         state.demo.clone()
@@ -61,8 +60,13 @@ async fn dispatch(app: AppHandle, request: Request) -> Result<Value, String> {
     if request.command == "settings_save"
         && request.args["settings"].get("launch_at_login").is_some()
     {
-        return Err("Launch at login is unavailable in the App Store 1.0 build.".into());
+        return Err(UserError::native(
+            "settings_save",
+            "Launch at login is unavailable in the App Store 1.0 build.".into(),
+        ));
     }
+    let operation = request.command.clone();
+    let worker_operation = operation.clone();
     let app_worker = app.clone();
     let should_wake = !request.demo
         && !matches!(
@@ -70,35 +74,131 @@ async fn dispatch(app: AppHandle, request: Request) -> Result<Value, String> {
             "snapshot" | "session" | "compare" | "export"
         );
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let mut engine = engine
-            .lock()
-            .map_err(|_| "The local index is unavailable; restart Chip Count.".to_string())?;
+        let mut engine = engine.lock().map_err(|_| {
+            UserError::new(
+                "index_unavailable",
+                "The index worker stopped.",
+                "Restart Chip Count and retry.",
+                "Index mutex was poisoned",
+            )
+        })?;
         #[cfg(feature = "app-store")]
         if !request.demo {
             let state = app_worker.state::<DesktopState>();
-            let mut access = state
-                .access
-                .lock()
-                .map_err(|_| "Source access is unavailable.")?;
-            let _leases = access.refresh(&mut engine)?;
-            if request.command == "source_save" {
-                let mut args = request.args;
-                access.prepare_save(&mut engine, &mut args)?;
-                return Ok(json!({"ok":true}));
+            let mut access = state.access.lock().map_err(|_| {
+                UserError::native("source_save", "Source access is unavailable.".into())
+            })?;
+            if !request.command.starts_with("index_") {
+                let engine = engine
+                    .engine()
+                    .map_err(|e| UserError::from_error(&worker_operation, &e))?;
+                let _leases = access
+                    .refresh(engine)
+                    .map_err(|e| UserError::native("source_save", e))?;
+                if request.command == "source_save" {
+                    let mut args = request.args;
+                    access
+                        .prepare_save(engine, &mut args)
+                        .map_err(|e| UserError::native("source_save", e))?;
+                    return Ok(json!({"ok":true}));
+                }
             }
         }
         #[cfg(not(feature = "app-store"))]
         let _ = app_worker;
         engine
             .dispatch(&request.command, request.args)
-            .map_err(|e| e.to_string())
+            .map_err(|e| UserError::from_error(&worker_operation, &e))
     })
     .await
-    .map_err(|e| format!("Index worker stopped: {e}"))??;
+    .map_err(|e| {
+        UserError::new(
+            "index_unavailable",
+            "The index worker stopped.",
+            "Retry the operation or restart Chip Count.",
+            e.to_string(),
+        )
+    })??;
     if should_wake {
         let _ = state.wake.try_send(());
     }
     Ok(result)
+}
+
+#[tauri::command]
+async fn desktop_settings(app: AppHandle, settings: DesktopSettings) -> Result<Value, UserError> {
+    desktop_settings_inner(app, settings).await
+}
+#[tauri::command]
+async fn compact(app: AppHandle) -> Result<Value, UserError> {
+    compact_inner(app)
+        .await
+        .map_err(|e| UserError::native("compact", e))
+}
+#[tauri::command]
+async fn reveal_path(app: AppHandle, path: String) -> Result<Value, UserError> {
+    reveal_path_inner(app, path)
+        .await
+        .map_err(|e| UserError::native("reveal_path", e))
+}
+#[tauri::command]
+async fn save_export(
+    app: AppHandle,
+    content: String,
+    filename: String,
+) -> Result<Value, UserError> {
+    save_export_inner(app, content, filename)
+        .await
+        .map_err(|e| UserError::native("save_export", e))
+}
+#[tauri::command]
+async fn select_source(app: AppHandle, directory: bool) -> Result<Value, UserError> {
+    select_source_inner(app, directory)
+        .await
+        .map_err(|e| UserError::native("select_source", e))
+}
+#[tauri::command]
+async fn restore_index(app: AppHandle) -> Result<Value, UserError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        let selected = on_main(&app, source_access::restore_panel)
+            .map_err(|e| UserError::native("restore_index", e))?;
+        #[cfg(target_os = "macos")]
+        let Some(selected) = selected
+        else {
+            return Ok(json!({"restored":false}));
+        };
+        #[cfg(target_os = "macos")]
+        let path = selected.path.clone();
+        #[cfg(not(target_os = "macos"))]
+        let path = {
+            let Some(selected) = app
+                .dialog()
+                .file()
+                .add_filter("Chip Count backup", &["sqlite"])
+                .blocking_pick_file()
+            else {
+                return Ok(json!({"restored":false}));
+            };
+            selected
+                .into_path()
+                .map_err(|e| UserError::native("restore_index", e.to_string()))?
+        };
+        let state = app.state::<DesktopState>();
+        let mut index = state.real.lock().map_err(|_| {
+            UserError::native(
+                "restore_index",
+                "The index worker stopped; restart Chip Count.".into(),
+            )
+        })?;
+        let backup = index
+            .restore(&path)
+            .map_err(|e| UserError::new("restore_failed", "The selected backup could not be restored.", "Select a compatible Chip Count SQLite backup, check index write access, and retry. The original index and recovery copies are retained.", format!("{e:#}")))?;
+        let _ = state.wake.try_send(());
+        Ok(json!({"restored":true,"backup":backup}))
+    })
+    .await
+    .map_err(|e| UserError::native("restore_index", e.to_string()))?
 }
 
 fn emit_status(app: &AppHandle, paused: bool) {
@@ -126,21 +226,18 @@ struct DesktopSettings {
     notifications: Option<bool>,
 }
 
-#[tauri::command]
-async fn desktop_settings(app: AppHandle, settings: DesktopSettings) -> Result<Value, String> {
+async fn desktop_settings_inner(
+    app: AppHandle,
+    settings: DesktopSettings,
+) -> Result<Value, UserError> {
     #[cfg(any(feature = "app-store", not(feature = "launch-agent")))]
     if settings.launch_at_login.is_some() {
-        return Err("Launch at login is unavailable in this build.".into());
-    }
-    #[cfg(all(feature = "launch-agent", not(feature = "app-store")))]
-    if let Some(enabled) = settings.launch_at_login {
-        let manager = app.autolaunch();
-        let result = if enabled {
-            manager.enable()
-        } else {
-            manager.disable()
-        };
-        result.map_err(|e| format!("Could not change launch at login: {e}"))?;
+        return Err(UserError::new(
+            "invalid_input",
+            "Launch at login is unavailable in this build.",
+            "Use the other desktop preferences in Settings.",
+            "launch_at_login",
+        ));
     }
     let state = app.state::<DesktopState>();
     let mut saved = serde_json::Map::new();
@@ -153,16 +250,65 @@ async fn desktop_settings(app: AppHandle, settings: DesktopSettings) -> Result<V
     if let Some(v) = settings.notifications {
         saved.insert("notifications".into(), json!(v));
     }
+    #[cfg(all(feature = "launch-agent", not(feature = "app-store")))]
+    let previous_login = if let Some(enabled) = settings.launch_at_login {
+        let manager = app.autolaunch();
+        let previous = manager
+            .is_enabled()
+            .map_err(|e| UserError::native("desktop_settings", e.to_string()))?;
+        let result = if enabled {
+            manager.enable()
+        } else {
+            manager.disable()
+        };
+        result.map_err(|e| {
+            UserError::native(
+                "desktop_settings",
+                format!("Could not change launch at login: {e}"),
+            )
+        })?;
+        Some(previous)
+    } else {
+        None
+    };
     let engine = state.real.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         engine
             .lock()
-            .map_err(|_| "The local index is unavailable.".to_string())?
+            .map_err(|_| {
+                UserError::new(
+                    "index_unavailable",
+                    "The index worker stopped.",
+                    "Restart Chip Count and retry.",
+                    "Index mutex was poisoned",
+                )
+            })?
             .dispatch("settings_save", json!({"settings":saved}))
-            .map_err(|e| e.to_string())
+            .map_err(|e| UserError::from_error("settings_save", &e))
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| UserError::native("desktop_settings", e.to_string()))
+    .and_then(|v| v);
+    if let Err(mut error) = result {
+        #[cfg(all(feature = "launch-agent", not(feature = "app-store")))]
+        if let Some(previous) = previous_login {
+            let manager = app.autolaunch();
+            let rollback = if previous {
+                manager.enable()
+            } else {
+                manager.disable()
+            };
+            if let Err(rollback) = rollback {
+                error.next_steps.push_str(" Check Chip Count in macOS Login Items; its previous system preference could not be restored.");
+                error
+                    .diagnostics
+                    .push_str(&format!("\nLogin Items restore: {rollback}"));
+            }
+        }
+        #[cfg(any(feature = "app-store", not(feature = "launch-agent")))]
+        let _ = &mut error;
+        return Err(error);
+    }
     if let Some(v) = settings.close_to_tray {
         state.close_to_tray.store(v, Ordering::Relaxed);
     }
@@ -180,8 +326,7 @@ fn open_main(app: &AppHandle) {
     }
 }
 
-#[tauri::command]
-async fn compact(app: AppHandle) -> Result<Value, String> {
+async fn compact_inner(app: AppHandle) -> Result<Value, String> {
     if let Some(window) = app.get_webview_window("compact") {
         window.show().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
@@ -220,22 +365,22 @@ fn allowed_reveal(path: &Path, snapshot: &Value) -> Result<PathBuf, String> {
     Err("Only indexed source files and known project folders can be revealed.".into())
 }
 
-#[tauri::command]
-async fn reveal_path(app: AppHandle, path: String) -> Result<Value, String> {
+async fn reveal_path_inner(app: AppHandle, path: String) -> Result<Value, String> {
     let engine = app.state::<DesktopState>().real.clone();
     #[cfg(feature = "app-store")]
     let app_worker = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut engine = engine
+        let mut index = engine
             .lock()
             .map_err(|_| "The local index is unavailable.".to_string())?;
+        let engine = index.engine().map_err(|e| e.to_string())?;
         #[cfg(feature = "app-store")]
         let _leases = app_worker
             .state::<DesktopState>()
             .access
             .lock()
             .map_err(|_| "Source access is unavailable.")?
-            .refresh(&mut engine)?;
+            .refresh(engine)?;
         let snapshot = engine
             .dispatch("snapshot", json!({}))
             .map_err(|e| e.to_string())?;
@@ -280,8 +425,11 @@ async fn reveal_path(app: AppHandle, path: String) -> Result<Value, String> {
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-async fn save_export(app: AppHandle, content: String, filename: String) -> Result<Value, String> {
+async fn save_export_inner(
+    app: AppHandle,
+    content: String,
+    filename: String,
+) -> Result<Value, String> {
     if content.len() > 64 * 1024 * 1024 {
         return Err(
             "This export exceeds the 64 MB desktop limit. Select a smaller date range.".into(),
@@ -324,26 +472,54 @@ async fn save_export(app: AppHandle, content: String, filename: String) -> Resul
                 .map_err(|_| "Select a local export file.")?
         };
         let engine = app.state::<DesktopState>().real.clone();
-        let mut engine = engine
-            .lock()
-            .map_err(|_| "The local index is unavailable.")?;
+        let mut index = engine.lock().map_err(|_| "The local index is unavailable.")?;
+        if let Some(parent) = index.path().parent() {
+            if let (Ok(directory), Ok(destination)) = (parent.canonicalize(), path.parent().unwrap_or(Path::new("/")).canonicalize()) {
+                if destination.starts_with(directory) {
+                    return Err("Choose a destination outside Chip Count's index directory to preserve your database and recovery copies.".into());
+                }
+            }
+        }
+        let engine = index.engine().map_err(|e| e.to_string())?;
         #[cfg(feature = "app-store")]
         let _leases = app
             .state::<DesktopState>()
             .access
             .lock()
             .map_err(|_| "Source access is unavailable.")?
-            .refresh(&mut engine)?;
+            .refresh(engine)?;
         #[cfg(not(feature = "app-store"))]
-        let _ = &mut engine;
+        let _ = &engine;
         ensure_export_destination(&path, &engine.source_records().map_err(|e| e.to_string())?)?;
         // The only writable destination comes directly from the native dialog.
-        std::fs::write(&path, content.as_bytes())
-            .map_err(|e| format!("Could not save export: {e}"))?;
+        atomic_export(&path, content.as_bytes())?;
         Ok(json!({"saved":true,"path":path.to_string_lossy()}))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn atomic_export(path: &Path, content: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let temporary = path.with_file_name(format!(
+        ".chip-count-export-{}-{}.tmp",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|e| format!("Could not save export; the previous destination was kept: {e}"))
 }
 
 /// Native UI work is scheduled from a blocking worker, never blocks Tauri's UI thread.
@@ -361,8 +537,7 @@ fn on_main<T: Send + 'static>(
         .map_err(|_| "The native dialog closed unexpectedly.".to_string())?
 }
 
-#[tauri::command]
-async fn select_source(app: AppHandle, directory: bool) -> Result<Value, String> {
+async fn select_source_inner(app: AppHandle, directory: bool) -> Result<Value, String> {
     #[cfg(feature = "app-store")]
     return tauri::async_runtime::spawn_blocking(move || {
         let value = on_main(&app, move || source_access::choose(directory))?;
@@ -490,16 +665,17 @@ fn start_monitor(
                 });
                 if !paused {
                     let result = (|| {
-                        let mut engine = state
+                        let mut index = state
                             .real
                             .lock()
                             .map_err(|_| "The local index is unavailable.".to_string())?;
+                        let engine = index.engine().map_err(|e| e.to_string())?;
                         #[cfg(feature = "app-store")]
                         let leases = state
                             .access
                             .lock()
                             .map_err(|_| "Source access is unavailable.")?
-                            .refresh(&mut engine)?;
+                            .refresh(engine)?;
                         engine.reconcile().map_err(|e| e.to_string())?;
                         watch_changed_roots(&mut watcher, &mut roots, engine.watch_roots());
                         // Unwatch first, then release previous grants. Watchers retain their scopes
@@ -568,18 +744,24 @@ fn start_monitor(
                             emit_status(&app, state.paused.load(Ordering::Relaxed));
                         }
                         Err(error) => {
-                            let _ = app.emit("index-error", json!({"message":error}));
+                            let _ = app.emit("index-error", UserError::new("index_unavailable", "Background indexing could not continue.", "Retry the scan in Sources, check source diagnostics and disk access, or restart Chip Count to open index recovery.", error));
                         }
                     }
                 }
                 // Source removal/disable/revocation must also retire watchers while paused.
                 #[cfg(feature = "app-store")]
                 if paused {
-                    if let Ok(mut engine) = state.real.lock() {
-                        if let Ok(mut access) = state.access.lock() {
-                            if let Ok(leases) = access.refresh(&mut engine) {
-                                watch_changed_roots(&mut watcher, &mut roots, engine.watch_roots());
-                                _watch_leases = leases;
+                    if let Ok(mut index) = state.real.lock() {
+                        if let Ok(engine) = index.engine() {
+                            if let Ok(mut access) = state.access.lock() {
+                                if let Ok(leases) = access.refresh(engine) {
+                                    watch_changed_roots(
+                                        &mut watcher,
+                                        &mut roots,
+                                        engine.watch_roots(),
+                                    );
+                                    _watch_leases = leases;
+                                }
                             }
                         }
                     }
@@ -631,26 +813,26 @@ pub fn run() {
             let directory = std::env::var_os("CHIP_COUNT_DATA_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
-            std::fs::create_dir_all(&directory)?;
+            let real = Arc::new(Mutex::new(LocalIndex::open(
+                &directory.join("chip-count.sqlite"),
+                cfg!(feature = "app-store"),
+            )));
             #[cfg(feature = "app-store")]
-            let mut engine = Engine::sandboxed(&directory.join("chip-count.sqlite"))?;
-            #[cfg(not(feature = "app-store"))]
-            let engine = Engine::open(&directory.join("chip-count.sqlite"))?;
-            #[cfg(feature = "app-store")]
-            let access = {
-                let mut access = source_access::SourceAccess::default();
-                access.refresh(&mut engine)?;
-                engine.dispatch(
-                    "settings_save",
-                    json!({"settings":{"launch_at_login":false}}),
-                )?;
-                engine.reconcile()?;
-                access
-            };
-            let real = Arc::new(Mutex::new(engine));
-            let demo = Arc::new(Mutex::new(Engine::demo()?));
+            let access = source_access::SourceAccess::default();
+            let demo = Arc::new(Mutex::new(LocalIndex::demo()?));
             let (wake, receiver) = mpsc::sync_channel(1);
-            let snapshot = real.lock().unwrap().dispatch("snapshot", json!({}))?;
+            let snapshot_result = real.lock().unwrap().dispatch("snapshot", json!({}));
+            if let Err(error) = &snapshot_result {
+                let error = UserError::from_error("open_index", error);
+                app.dialog()
+                    .message(format!(
+                        "{}\n\n{}\n\n{}",
+                        error.message, error.next_steps, error.diagnostics
+                    ))
+                    .title("Chip Count · Index recovery")
+                    .show(|_| {});
+            }
+            let snapshot = snapshot_result.unwrap_or(json!({}));
             app.manage(DesktopState {
                 real,
                 demo,
@@ -662,13 +844,54 @@ pub fn run() {
                 close_to_tray: Arc::new(AtomicBool::new(
                     snapshot["settings"]["close_to_tray"]
                         .as_bool()
-                        .unwrap_or(true),
+                        .unwrap_or(false),
                 )),
                 notifications: Arc::new(AtomicBool::new(
                     snapshot["settings"]["notifications"]
                         .as_bool()
                         .unwrap_or(false),
                 )),
+            });
+            // Extend Tauri's default menu, retaining native Edit, Window and Services behavior.
+            let app_menu = Menu::default(app.handle())?;
+            let settings =
+                MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
+            #[cfg(target_os = "macos")]
+            if let Some(tauri::menu::MenuItemKind::Submenu(menu)) = app_menu.items()?.first() {
+                menu.insert(&settings, 1)?;
+            }
+            #[cfg(not(target_os = "macos"))]
+            app_menu.append(&settings)?;
+            for item in app_menu.items()? {
+                if let tauri::menu::MenuItemKind::Submenu(menu) = item {
+                    if menu.text()? == "Help" {
+                        menu.append(&MenuItem::with_id(
+                            app,
+                            "help",
+                            "Chip Count Help",
+                            true,
+                            None::<&str>,
+                        )?)?;
+                        menu.append(&MenuItem::with_id(
+                            app,
+                            "diagnostics",
+                            "Source diagnostics",
+                            true,
+                            None::<&str>,
+                        )?)?;
+                    }
+                }
+            }
+            app.set_menu(app_menu)?;
+            app.on_menu_event(|app, event| {
+                let action = match event.id.as_ref() {
+                    "settings" => "settings",
+                    "help" => "help",
+                    "diagnostics" => "sources",
+                    _ => return,
+                };
+                open_main(app);
+                let _ = app.emit_to("main", "navigate", action);
             });
             let summary =
                 MenuItem::with_id(app, "summary", "Indexing local usage…", false, None::<&str>)?;
@@ -739,7 +962,8 @@ pub fn run() {
             compact,
             reveal_path,
             save_export,
-            select_source
+            select_source,
+            restore_index
         ])
         .build(tauri::generate_context!())
         .expect("Chip Count could not start")
@@ -761,6 +985,25 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_export_retains_destination_and_removes_temporary_file() {
+        let root = std::env::temp_dir().join(format!("chip-atomic-export-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("destination")).unwrap();
+        std::fs::write(root.join("destination/original.json"), b"keep me").unwrap();
+        assert!(atomic_export(&root.join("destination"), b"new content").is_err());
+        assert_eq!(
+            std::fs::read(root.join("destination/original.json")).unwrap(),
+            b"keep me"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::write(root.join("export.json"), b"old").unwrap();
+        atomic_export(&root.join("export.json"), b"complete new report").unwrap();
+        assert_eq!(
+            std::fs::read(root.join("export.json")).unwrap(),
+            b"complete new report"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn export_cannot_overwrite_sources_or_follow_symlinks_into_them() {
         let root = std::env::temp_dir().join(format!("chip-export-{}", std::process::id()));

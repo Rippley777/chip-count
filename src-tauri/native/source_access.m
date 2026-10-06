@@ -59,6 +59,19 @@ void *chip_save_panel(const char *filename) {
         return retainURL(panel.URL);
     }
 }
+void *chip_restore_panel(void) {
+    @autoreleasepool {
+        NSOpenPanel *panel = [NSOpenPanel openPanel];
+        panel.canChooseDirectories = NO;
+        panel.canChooseFiles = YES;
+        panel.allowsMultipleSelection = NO;
+        panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"sqlite"]];
+        panel.message = @"Select a known-good Chip Count SQLite backup. The current index and metadata will be preserved before restoring. Notes created after the backup remain in the recovery copy.";
+        panel.prompt = @"Restore backup";
+        if ([panel runModal] != NSModalResponseOK) return NULL;
+        return retainURL(panel.URL);
+    }
+}
 void chip_reveal(const char *path) {
     @autoreleasepool {
         [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:[NSString stringWithUTF8String:path]]]];

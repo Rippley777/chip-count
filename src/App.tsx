@@ -4,6 +4,8 @@ import {
   useRef,
   useCallback,
   useMemo,
+  createContext,
+  useContext,
   type ReactNode,
   type FormEvent,
   type CSSProperties,
@@ -79,12 +81,14 @@ import { useReactTable, getCoreRowModel, flexRender, type ColumnDef } from '@tan
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   api,
+  userError,
+  restoreIndex,
+  type UserFacingError,
   pickPath,
   saveExport,
   revealPath,
   setMonitoring,
   openCompact,
-  saveDesktopSettings,
   isDesktop,
   isAppStore,
   getMonitoring,
@@ -330,6 +334,34 @@ function Empty({
     </div>
   );
 }
+const FailureContext = createContext<{
+  error: UserFacingError | null;
+  clear: () => void;
+  setError: (error: UserFacingError | null) => void;
+}>({
+  error: null,
+  clear: () => {},
+  setError: () => {},
+});
+function ErrorNotice({ error, clear }: { error: UserFacingError; clear?: () => void }) {
+  return (
+    <div className="error-notice" role="alert">
+      <strong>{error.data.message}</strong>
+      <p>{error.data.next_steps}</p>
+      {error.data.diagnostics && (
+        <details>
+          <summary>Diagnostics</summary>
+          <pre>{error.data.diagnostics}</pre>
+        </details>
+      )}
+      {clear && (
+        <button className="text-button" onClick={clear}>
+          Dismiss error
+        </button>
+      )}
+    </div>
+  );
+}
 function Modal({
   open,
   onClose,
@@ -345,11 +377,37 @@ function Modal({
   children: ReactNode;
   wide?: boolean;
 }) {
+  const opener = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const failure = useContext(FailureContext);
   return (
     <Dialog.Root open={open} onOpenChange={(v) => !v && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className={'dialog ' + (wide ? 'wide' : '')}>
+        <Dialog.Content
+          ref={contentRef}
+          className={'dialog ' + (wide ? 'wide' : '')}
+          onOpenAutoFocus={(e) => {
+            opener.current =
+              document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            failure.clear();
+            const input = contentRef.current?.querySelector<HTMLElement>(
+              'input:not([type="checkbox"]), select, textarea',
+            );
+            if (input) {
+              e.preventDefault();
+              input.focus();
+            }
+          }}
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            const target = opener.current?.isConnected
+              ? opener.current
+              : document.querySelector<HTMLElement>('.nav-item.active, .session-row-main');
+            target?.focus();
+          }}
+        >
+          {failure.error && <ErrorNotice error={failure.error} clear={failure.clear} />}
           <div className="dialog-heading">
             <div>
               <Dialog.Title>{title}</Dialog.Title>
@@ -472,6 +530,9 @@ function UsageChart({
   rate?: boolean;
   onInterval?: (from: string, to: string) => void;
 }) {
+  const [bucketKey, setBucketKey] = useState('');
+  const [intervalStart, setIntervalStart] = useState('');
+  const [intervalEnd, setIntervalEnd] = useState('');
   const timeAxis = data.length > 0 && data.every((b) => typeof b.x === 'number');
   const timeLabel = (x: number) =>
     data.find((b) => b.x === x)?.label ||
@@ -615,6 +676,77 @@ function UsageChart({
           </AreaChart>
         </ResponsiveContainer>
       </div>
+      {onClick && data.length > 0 && (
+        <form
+          className="chart-controls"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onClick(data.some((b) => b.key === bucketKey) ? bucketKey : data[0].key);
+          }}
+        >
+          <Field label="Usage date">
+            <select
+              aria-label="Usage date"
+              value={data.some((b) => b.key === bucketKey) ? bucketKey : data[0].key}
+              onChange={(e) => setBucketKey(e.target.value)}
+            >
+              {data.map((b) => (
+                <option key={b.key} value={b.key}>
+                  {b.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <button className="button small" type="submit">
+            Inspect day
+          </button>
+        </form>
+      )}
+      {onInterval && data.length > 1 && (
+        <form
+          className="chart-controls"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const start = data.findIndex((b) => b.key === intervalStart);
+            const end = data.findIndex((b) => b.key === intervalEnd);
+            const first = start < 0 ? 0 : start,
+              last = end < 0 ? data.length - 1 : end;
+            onInterval(data[Math.min(first, last)].key, data[Math.max(first, last)].key);
+          }}
+        >
+          <Field label="First interval">
+            <select
+              aria-label="First interval"
+              value={data.some((b) => b.key === intervalStart) ? intervalStart : data[0].key}
+              onChange={(e) => setIntervalStart(e.target.value)}
+            >
+              {data.map((b) => (
+                <option key={b.key} value={b.key}>
+                  {b.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Last interval">
+            <select
+              aria-label="Last interval"
+              value={
+                data.some((b) => b.key === intervalEnd) ? intervalEnd : data[data.length - 1].key
+              }
+              onChange={(e) => setIntervalEnd(e.target.value)}
+            >
+              {data.map((b) => (
+                <option key={b.key} value={b.key}>
+                  {b.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <button className="button small" type="submit">
+            Inspect interval
+          </button>
+        </form>
+      )}
       {cost && (
         <p className="small-note">
           API-equivalent estimate in USD ·{' '}
@@ -653,12 +785,24 @@ type Run = <K extends keyof Commands>(
 ) => Promise<Commands[K]['result'] | undefined>;
 type View = { name: string; filter: Filter };
 
-export default function App() {
+export default function AppRoot() {
+  const [error, setError] = useState<UserFacingError | null>(null);
+  return (
+    <FailureContext.Provider value={{ error, setError, clear: () => setError(null) }}>
+      <App />
+    </FailureContext.Provider>
+  );
+}
+function App() {
   const [page, setPage] = useStored<Page>('page', 'Live');
   const [demo, setDemo] = useStored('demo', false);
   const [filter, setFilter] = useStored<Filter>('filter', {});
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState('');
+  const [indexError, setIndexError] = useState<UserFacingError | null>(null);
+  const { error: failure, setError: setFailure } = useContext(FailureContext);
+  const [recoveryCopy, setRecoveryCopy] = useState('');
+  const [helpOpen, setHelpOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -672,6 +816,7 @@ export default function App() {
   const [command, setCommand] = useState(false);
   const [commandSearch, setCommandSearch] = useState('');
   const [exportOpen, setExportOpen] = useState(false);
+  const [exportStatus, setExportStatus] = useState('');
   const [exportIds, setExportIds] = useState<string[] | undefined>();
   const [exportFormat, setExportFormat] = useState<'csv' | 'json'>('csv');
   const [redactPaths, setRedactPaths] = useState(true);
@@ -705,8 +850,12 @@ export default function App() {
       if (id !== requestId.current) return;
       setSnapshot(data);
       setError('');
+      setIndexError(null);
     } catch (e) {
-      if (id === requestId.current) setError(String(e));
+      if (id === requestId.current) {
+        setError(String(userError(e)));
+        setIndexError(userError(e));
+      }
     } finally {
       if (id === requestId.current) setLoading(false);
     }
@@ -785,9 +934,19 @@ export default function App() {
       });
       if (disposed) stop();
       else cleanups.push(stop);
-      const stopError = await listen<{ message: string }>('index-error', (event) =>
-        setError(event.payload.message),
-      );
+      const stopNavigate = await listen<string>('navigate', (event) => {
+        setCommand(false);
+        setSourceOpen(false);
+        setExportOpen(false);
+        if (event.payload === 'help') setHelpOpen(true);
+        else setPage(event.payload === 'settings' ? 'Settings' : 'Sources');
+      });
+      if (disposed) stopNavigate();
+      else cleanups.push(stopNavigate);
+      const stopError = await listen<import('./api').UserErrorData>('index-error', (event) => {
+        setError(String(userError(event.payload)));
+        setIndexError(userError(event.payload));
+      });
       if (disposed) stopError();
       else cleanups.push(stopError);
     });
@@ -795,7 +954,7 @@ export default function App() {
       disposed = true;
       cleanups.forEach((fn) => fn());
     };
-  }, [refresh, refreshDetail]);
+  }, [refresh, refreshDetail, setPage]);
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(''), 4000);
@@ -818,6 +977,14 @@ export default function App() {
   ]);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+        if (!document.querySelector('[role="dialog"]')) {
+          e.preventDefault();
+          setPage('Settings');
+        }
+        return;
+      }
+      if (document.querySelector('[role="dialog"]') && e.key !== 'Escape') return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCommand((v) => !v);
@@ -842,6 +1009,7 @@ export default function App() {
   const run: Run = useCallback(
     async (command, args, message) => {
       setBusy(true);
+      setFailure(null);
       try {
         const result = await api(command, args, latest.current.demo);
         if (message) setToast(message);
@@ -849,7 +1017,7 @@ export default function App() {
         await refreshDetail();
         return result;
       } catch (e) {
-        setToast('Could not complete: ' + String(e));
+        setFailure(userError(e));
         return undefined;
       } finally {
         setBusy(false);
@@ -887,7 +1055,10 @@ export default function App() {
     setExportOpen(true);
   };
   const saveExportFile = async () => {
+    setExportStatus('');
+    const opener = document.activeElement as HTMLElement | null;
     setBusy(true);
+    setFailure(null);
     try {
       const result = await api(
         'export',
@@ -900,13 +1071,19 @@ export default function App() {
         },
         demo,
       );
-      await saveExport(result);
+      if (!(await saveExport(result))) {
+        setExportStatus('Export cancelled. You can choose a destination when ready.');
+        return;
+      }
       setExportOpen(false);
       setToast('Export ready');
     } catch (e) {
-      setToast('Export failed: ' + String(e));
+      setFailure(userError(e));
     } finally {
       setBusy(false);
+      requestAnimationFrame(() => {
+        if (opener?.isConnected && document.querySelector('[role="dialog"]')) opener.focus();
+      });
     }
   };
   const togglePause = async () => {
@@ -956,6 +1133,74 @@ export default function App() {
       value !== '' &&
       value !== false,
   );
+  const recover = async (action: 'index_retry' | 'index_preserve' | 'restore') => {
+    const opener = document.activeElement as HTMLElement | null;
+    setBusy(true);
+    setFailure(null);
+    try {
+      if (action === 'restore') {
+        const result = await restoreIndex();
+        if (!result.restored) return;
+        setRecoveryCopy(result.backup || '');
+      } else if (action === 'index_preserve') {
+        const result = await api(action, {}, false);
+        setRecoveryCopy(result.backup);
+      } else {
+        const result = await api(action, {}, false);
+        if (result.backup) setRecoveryCopy(result.backup);
+      }
+      await refresh(true);
+    } catch (e) {
+      setFailure(userError(e));
+    } finally {
+      setBusy(false);
+      requestAnimationFrame(() => {
+        if (opener?.isConnected) opener.focus();
+      });
+    }
+  };
+  if (!snapshot && indexError)
+    return (
+      <main className="recovery-screen">
+        <img src="/chip.svg" alt="" />
+        <h1>Open your local index</h1>
+        <ErrorNotice error={indexError} />
+        {failure && <ErrorNotice error={failure} clear={() => setFailure(null)} />}
+        <p>
+          Your existing database and local notes remain on this device. Recovery never creates an
+          empty replacement index.
+        </p>
+        <div className="empty-actions">
+          <button
+            className="button primary"
+            disabled={busy}
+            onClick={() => void recover('index_retry')}
+          >
+            Retry opening index
+          </button>
+          <button className="button" disabled={busy} onClick={() => void recover('index_preserve')}>
+            Preserve recovery copy
+          </button>
+          {isDesktop && (
+            <button className="button" disabled={busy} onClick={() => void recover('restore')}>
+              Select backup to restore…
+            </button>
+          )}
+          <button className="button" onClick={() => changeDemo(true)}>
+            Explore demo workspace
+          </button>
+        </div>
+        <p>
+          Restoring validates the selected backup and preserves the current database, sidecars, and
+          notification metadata first. Notes added after that backup remain in the recovery copy.
+        </p>
+        {recoveryCopy && (
+          <p role="status">
+            Recovery copy saved: <code>{recoveryCopy}</code>
+          </p>
+        )}
+      </main>
+    );
   const compactMonitor = compactMode && snapshot;
   if (compactMonitor)
     return (
@@ -1086,6 +1331,10 @@ export default function App() {
               </button>
             ))}
           </nav>
+          <button className="nav-item" onClick={() => setHelpOpen(true)}>
+            <CircleHelp size={17} />
+            Help
+          </button>
           <button className="command-trigger" onClick={() => setCommand(true)}>
             <Command size={15} />
             <span>Quick actions</span>
@@ -1094,7 +1343,7 @@ export default function App() {
           <div className="sidebar-footer">
             <span className="labs-mark">R</span>
             <span>Rippley Labs</span>
-            <small>v0.1.0</small>
+            <small>v0.1.1</small>
           </div>
         </div>
       </aside>
@@ -1151,13 +1400,20 @@ export default function App() {
             </button>
           </div>
         )}
+        {failure && <ErrorNotice error={failure} clear={() => setFailure(null)} />}
+        {recoveryCopy && (
+          <p className="small-note" role="status">
+            Recovery copy saved: {recoveryCopy}
+          </p>
+        )}
         {error && (
           <div className="error-banner">
             <CircleAlert size={15} />
             <span>
-              <strong>Connection unavailable.</strong> {error}
+              <strong>Index needs attention.</strong> {error}
             </span>
             <button onClick={() => refresh(true)}>Retry</button>
+            <button onClick={() => setPage('Sources')}>Source diagnostics</button>
           </div>
         )}
         <div
@@ -1582,28 +1838,58 @@ export default function App() {
                         ? compact(snapshot.totals.unpriced_tokens) + ' tokens unpriced'
                         : 'All usage stays local'}
                     </span>
-                    {snapshot && snapshot.total_sessions > 500 && (
+                    {snapshot && snapshot.total_sessions > (filter.limit || 500) && (
                       <>
+                        <span role="status">
+                          Sessions {(filter.offset || 0) + 1}–
+                          {Math.min(
+                            snapshot.total_sessions,
+                            (filter.offset || 0) + (filter.limit || 500),
+                          )}{' '}
+                          of {snapshot.total_sessions}
+                        </span>
                         <button
                           className="text-button"
+                          aria-label="Previous session page"
                           disabled={!filter.offset}
-                          onClick={() =>
-                            setFilter({
-                              ...filter,
-                              offset: Math.max(0, (filter.offset || 0) - 500),
-                            })
-                          }
+                          onClick={() => {
+                            const offset = Math.max(
+                              0,
+                              (filter.offset || 0) - (filter.limit || 500),
+                            );
+                            setFilter({ ...filter, offset });
+                            if (offset === 0)
+                              requestAnimationFrame(() =>
+                                document
+                                  .querySelector<HTMLButtonElement>(
+                                    '[aria-label="Next session page"]',
+                                  )
+                                  ?.focus(),
+                              );
+                          }}
                         >
                           Previous
                         </button>
                         <button
                           className="text-button"
-                          disabled={(filter.offset || 0) + 500 >= snapshot.total_sessions}
-                          onClick={() =>
-                            setFilter({ ...filter, offset: (filter.offset || 0) + 500 })
+                          aria-label="Next session page"
+                          disabled={
+                            (filter.offset || 0) + (filter.limit || 500) >= snapshot.total_sessions
                           }
+                          onClick={() => {
+                            const offset = (filter.offset || 0) + (filter.limit || 500);
+                            setFilter({ ...filter, offset });
+                            if (offset + (filter.limit || 500) >= snapshot.total_sessions)
+                              requestAnimationFrame(() =>
+                                document
+                                  .querySelector<HTMLButtonElement>(
+                                    '[aria-label="Previous session page"]',
+                                  )
+                                  ?.focus(),
+                              );
+                          }}
                         >
-                          Next 500
+                          Next {filter.limit || 500}
                         </button>
                       </>
                     )}
@@ -1628,7 +1914,17 @@ export default function App() {
                     <Inspector
                       detail={detail}
                       error={detailError}
-                      onClose={() => setSelected(null)}
+                      onClose={() => {
+                        const id = selected;
+                        setSelected(null);
+                        requestAnimationFrame(() => {
+                          const rows =
+                            document.querySelectorAll<HTMLButtonElement>('.session-row-main');
+                          (
+                            Array.from(rows).find((row) => row.dataset.sessionId === id) || rows[0]
+                          )?.focus();
+                        });
+                      }}
                       run={run}
                       onCompare={compare}
                       onExport={(id) => exportView([id])}
@@ -1692,7 +1988,6 @@ export default function App() {
             <SettingsPage
               snapshot={snapshot}
               run={run}
-              onToast={setToast}
               onSources={() => setPage('Sources')}
               onDemo={() => changeDemo(!demo)}
               demo={demo}
@@ -1810,6 +2105,11 @@ export default function App() {
         }
       >
         <div className="dialog-body">
+          {exportStatus && (
+            <p className="small-note" role="status">
+              {exportStatus}
+            </p>
+          )}
           <Field label="File format">
             <select
               value={exportFormat}
@@ -1892,6 +2192,47 @@ export default function App() {
         run={run}
         onToast={setToast}
       />
+      <Modal
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        title="Chip Count Help"
+        description="Read-only local usage accounting and keyboard navigation."
+      >
+        <div className="dialog-body">
+          <p>
+            Configure Claude Code or Codex logs in Sources. Use Configure to reselect a missing
+            folder or file, Scan to retry reads, and file/line diagnostics to find malformed JSONL.
+          </p>
+          <p>
+            Search and filter history in Sessions. Tab to a session, press Enter to inspect it, and
+            use ↑ / ↓, Home / End or Page Up / Page Down to move through the list. Use the paging
+            buttons to load more history.
+          </p>
+          <p>
+            Charts with actions also provide selectors and buttons. Date filters use your reporting
+            timezone. Export includes the current filters; cancelling the native dialog keeps the
+            report ready.
+          </p>
+          <p>
+            ⌘ / Ctrl , opens Settings. ⌘ / Ctrl 1–8 changes pages; K opens quick actions; E exports.
+            Escape closes dialogs and returns focus to the opening control.
+          </p>
+          <p>
+            Rebuild preserves a SQLite backup before re-reading logs. Notes, local model rates,
+            budgets, and previous observations are retained. A corrupt index opens recovery; restore
+            a known-good backup after preserving the original.
+          </p>
+          <button
+            className="button"
+            onClick={() => {
+              setHelpOpen(false);
+              setPage('Sources');
+            }}
+          >
+            Open source diagnostics
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -1979,6 +2320,8 @@ function SessionList({
   density: Settings['density'];
 }) {
   const parent = useRef<HTMLDivElement>(null);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const pendingFocus = useRef<number | null>(null);
   const virtual = useVirtualizer({
     count: sessions.length,
     getScrollElement: () => parent.current,
@@ -1988,10 +2331,61 @@ function SessionList({
   useEffect(() => {
     virtual.measure();
   }, [density]);
+  useEffect(
+    () => () => {
+      if (pendingFocus.current !== null) cancelAnimationFrame(pendingFocus.current);
+    },
+    [],
+  );
+  const visible = virtual.getVirtualItems();
+  const entryId = visible.some((v) => sessions[v.index]?.id === focusedId)
+    ? focusedId
+    : sessions[visible[0]?.index || 0]?.id;
   return (
-    <div className="session-list" ref={parent}>
+    <div
+      className="session-list"
+      ref={parent}
+      aria-label="Session history"
+      onKeyDown={(e) => {
+        const button = (e.target as HTMLElement).closest<HTMLButtonElement>('.session-row-main');
+        if (!button || !sessions.length) return;
+        const current = Number(button.dataset.index);
+        const next =
+          e.key === 'ArrowDown'
+            ? current + 1
+            : e.key === 'ArrowUp'
+              ? current - 1
+              : e.key === 'Home'
+                ? 0
+                : e.key === 'End'
+                  ? sessions.length - 1
+                  : e.key === 'PageDown'
+                    ? current + 8
+                    : e.key === 'PageUp'
+                      ? current - 8
+                      : undefined;
+        if (next === undefined) return;
+        e.preventDefault();
+        const index = Math.max(0, Math.min(sessions.length - 1, next));
+        setFocusedId(sessions[index].id);
+        onSelect(sessions[index].id);
+        virtual.scrollToIndex(index, { align: 'auto' });
+        if (pendingFocus.current !== null) cancelAnimationFrame(pendingFocus.current);
+        let attempts = 0;
+        const focus = () => {
+          const target = parent.current?.querySelector<HTMLButtonElement>(
+            '[data-index="' + index + '"]',
+          );
+          if (target) {
+            target.focus({ preventScroll: true });
+            pendingFocus.current = null;
+          } else if (++attempts < 20) pendingFocus.current = requestAnimationFrame(focus);
+        };
+        pendingFocus.current = requestAnimationFrame(focus);
+      }}
+    >
       <div style={{ height: virtual.getTotalSize(), position: 'relative', width: '100%' }}>
-        {virtual.getVirtualItems().map((v) => {
+        {visible.map((v) => {
           const s = sessions[v.index];
           return (
             <div
@@ -2006,7 +2400,15 @@ function SessionList({
                 transform: 'translateY(' + v.start + 'px)',
               }}
             >
-              <button className="session-row-main" onClick={() => onSelect(s.id)}>
+              <button
+                className="session-row-main"
+                data-index={v.index}
+                data-session-id={s.id}
+                tabIndex={s.id === entryId ? 0 : -1}
+                aria-pressed={selected === s.id}
+                onFocus={() => setFocusedId(s.id)}
+                onClick={() => onSelect(s.id)}
+              >
                 <div className="session-row-top">
                   <span className="project-icon">
                     <Folder size={14} />
@@ -2074,6 +2476,7 @@ function SessionList({
               </button>
               <button
                 className={'pin-session ' + (s.pinned ? 'pinned' : '')}
+                tabIndex={s.id === entryId ? 0 : -1}
                 aria-label={s.pinned ? 'Unpin session' : 'Pin session'}
                 title={s.pinned ? 'Unpin session' : 'Pin to Live'}
                 onClick={() => onPin(s)}
@@ -2999,7 +3402,12 @@ function EventTable({
               className={selected === r.original.id ? 'selected' : ''}
               onClick={() => onSelect(r.original)}
               tabIndex={0}
-              onKeyDown={(e) => e.key === 'Enter' && onSelect(r.original)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onSelect(r.original);
+                }
+              }}
             >
               {r.getVisibleCells().map((c) => (
                 <td key={c.id}>{flexRender(c.column.columnDef.cell, c.getContext())}</td>
@@ -4312,6 +4720,7 @@ function Sources({
   onPause: () => void;
 }) {
   const [rebuild, setRebuild] = useState(false);
+  const [backup, setBackup] = useState('');
   return (
     <div className="standard-page">
       <div className="page-heading">
@@ -4418,6 +4827,28 @@ function Sources({
                 {s.message}
               </div>
             )}
+            {s.recovery_backup && (
+              <p className="small-note">
+                Source reselected; indexed history and notes retained. Preserved index:{' '}
+                <code>{s.recovery_backup}</code>
+              </p>
+            )}
+            {!!s.diagnostics?.length && (
+              <details className="source-diagnostics">
+                <summary>File and line diagnostics</summary>
+                <ul>
+                  {s.diagnostics.map((d, i) => (
+                    <li key={i}>
+                      <code>
+                        {d.path}
+                        {d.line > 0 ? ':' + d.line : ''}
+                      </code>
+                      <p>{d.message}</p>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
             {s.exclusions.length > 0 && (
               <p className="small-note">Excluded: {s.exclusions.join(', ')}</p>
             )}
@@ -4499,6 +4930,11 @@ function Sources({
           Rebuild index
         </button>
       </section>
+      {backup && (
+        <p className="small-note" role="status">
+          Preserved index: {backup}
+        </p>
+      )}
       <Modal
         open={rebuild}
         onClose={() => setRebuild(false)}
@@ -4508,7 +4944,9 @@ function Sources({
         <div className="dialog-body">
           <p className="small-note">
             Use this to recover a damaged derived index or apply parser changes. Local notes,
-            labels, sources, and preferences are kept. Large histories may take a moment.
+            labels, sources, prices, budgets, preferences, and existing observations are kept. A
+            SQLite backup is saved before the rebuild; it stops if a source is unavailable. Large
+            histories may take a moment.
           </p>
         </div>
         <div className="dialog-footer">
@@ -4520,7 +4958,10 @@ function Sources({
             disabled={busy}
             onClick={async () => {
               const ok = await run('rescan', { rebuild: true }, 'Local index rebuilt');
-              if (ok) setRebuild(false);
+              if (ok) {
+                setRebuild(false);
+                if (ok.backup) setBackup(ok.backup);
+              }
             }}
           >
             Rebuild index
@@ -4552,17 +4993,21 @@ function SourceDialog({
   const [exclusions, setExclusions] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [selectionError, setSelectionError] = useState<UserFacingError | null>(null);
   useEffect(() => {
     if (open) {
       setProvider(source?.provider || 'claude');
       setLabel(source?.label || 'Personal');
       setPath(source?.path || '');
       setSelectionId(undefined);
+      setSelectionError(null);
       setExclusions(source?.exclusions.join('\n') || '');
       setEnabled(source?.enabled ?? true);
     }
   }, [open, source]);
   const browse = async (directory: boolean) => {
+    setSelectionError(null);
+    const opener = document.activeElement as HTMLElement | null;
     try {
       const p = await pickPath(directory);
       if (p) {
@@ -4573,7 +5018,9 @@ function SourceDialog({
           'Enter an absolute local path below. Native file selection is available in the desktop app.',
         );
     } catch (e) {
-      onToast(String(e));
+      setSelectionError(userError(e));
+    } finally {
+      opener?.focus();
     }
   };
   return (
@@ -4608,6 +5055,9 @@ function SourceDialog({
         }}
       >
         <div className="dialog-body">
+          {selectionError && (
+            <ErrorNotice error={selectionError} clear={() => setSelectionError(null)} />
+          )}
           <div className="provider-choices">
             {(['claude', 'codex'] as const).map((p) => (
               <button
@@ -4698,7 +5148,6 @@ function SourceDialog({
 function SettingsPage({
   snapshot,
   run,
-  onToast,
   onSources,
   onDemo,
   demo,
@@ -4706,7 +5155,6 @@ function SettingsPage({
 }: {
   snapshot: Snapshot | null;
   run: Run;
-  onToast: (s: string) => void;
   onSources: () => void;
   onDemo: () => void;
   demo: boolean;
@@ -4743,19 +5191,6 @@ function SettingsPage({
     snapshot?.settings.retention_days,
   ]);
   const save = async (settings: Partial<Settings>) => {
-    if (
-      isDesktop &&
-      (settings.close_to_tray !== undefined ||
-        settings.launch_at_login !== undefined ||
-        settings.notifications !== undefined)
-    ) {
-      try {
-        await saveDesktopSettings(settings);
-      } catch (e) {
-        onToast(String(e));
-        return;
-      }
-    }
     await run('settings_save', { settings }, 'Preference saved');
   };
   const openPrice = (price: Price) => {
@@ -4800,12 +5235,7 @@ function SettingsPage({
               className="settings-form"
               onSubmit={(e) => {
                 e.preventDefault();
-                try {
-                  new Intl.DateTimeFormat('en', { timeZone: timezone }).format();
-                  void save({ timezone, inactivity_minutes: Number(inactivity) });
-                } catch {
-                  onToast('Enter a valid IANA timezone, such as America/Chicago.');
-                }
+                void save({ timezone, inactivity_minutes: Number(inactivity) });
               }}
             >
               <Field
@@ -4888,7 +5318,7 @@ function SettingsPage({
             <img src="/chip.svg" alt="" />
             <div>
               <h3>
-                Chip Count <Badge>0.1.0</Badge>
+                Chip Count <Badge>0.1.1</Badge>
               </h3>
               <p>Know where every token went.</p>
               <small>A local-first tool from Rippley Labs.</small>
@@ -5149,6 +5579,8 @@ function SettingsPage({
             <SectionHeading title="Keyboard shortcuts" />
             <div className="shortcut-list">
               {[
+                ['Settings', '⌘ / Ctrl ,'],
+                ['Select sessions', '↑ / ↓ · Home / End · Page Up / Down'],
                 ['Quick actions', '⌘ / Ctrl K'],
                 ['Export current view', '⌘ / Ctrl E'],
                 ['Navigate pages', '⌘ / Ctrl 1–8'],

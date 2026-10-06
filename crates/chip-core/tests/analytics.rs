@@ -313,7 +313,7 @@ fn fractional_token_rate_rounds_once_and_export_preserves_pricing_versions() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|p| p["model"] == "claude-sonnet-4-6" && p["version"] == "bundled-2026-10-03"));
+        .any(|p| p["model"] == "claude-sonnet-4-6" && p["version"] == "bundled-2026-10-06-claude"));
     assert!(data["pricing_history"]
         .as_array()
         .unwrap()
