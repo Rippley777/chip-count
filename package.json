@@ -7,6 +7,7 @@
     "dev": "concurrently -k -n core,ui \"npm:dev:core\" \"npm:dev:ui\"",
     "dev:ui": "vite --host 127.0.0.1",
     "dev:core": "cargo run -p chip-server",
+    "pricing:refresh": "cargo run -p chip-server -- --refresh-prices",
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",

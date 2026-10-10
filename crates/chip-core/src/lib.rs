@@ -10,6 +10,8 @@ mod ingest;
 pub mod model;
 mod parser;
 mod pricing;
+mod pricing_catalog;
+pub use pricing_catalog::CATALOG_URL as PRICING_CATALOG_URL;
 
 use anyhow::{bail, Context, Result};
 use chrono_tz::Tz;
@@ -231,9 +233,13 @@ impl Engine {
         Ok(out)
     }
     pub(crate) fn settings(&self) -> Result<Value> {
-        Ok(self
-            .get("config", "settings")?
-            .unwrap_or_else(settings_default))
+        let mut settings = settings_default();
+        if let Some(saved) = self.get("config", "settings")? {
+            for (key, value) in saved.as_object().context("Settings must be an object")? {
+                settings[key] = value.clone();
+            }
+        }
+        Ok(settings)
     }
     pub fn watch_roots(&self) -> Vec<PathBuf> {
         self.list("sources")
@@ -615,6 +621,7 @@ impl Engine {
             "notifications",
             "redact_paths",
             "redact_labels",
+            "pricing_auto_refresh",
         ] {
             if !s[k].is_boolean() {
                 bail!("{k} must be a boolean");

@@ -354,3 +354,24 @@ test('analytics paints real stacked usage and a chart point drills into its exac
   await expect(page.locator('.heading-count')).toHaveText(String(expected.total_sessions));
   expect(expected.totals.total).toBe(day.total);
 });
+
+test('pricing controls expose scheduling and prevent live refresh in demo mode', async ({
+  page,
+  request,
+}) => {
+  await page.goto('/');
+  await expect(page.locator('.session-row-main').first()).toBeVisible();
+  await navigate(page, 'Settings');
+  await page.getByRole('button', { name: 'Pricing', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Automatic price refresh' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Refresh prices now' })).toBeDisabled();
+  await expect(
+    page.getByText('Live price refresh is unavailable in demo mode.', { exact: false }),
+  ).toBeVisible();
+  const response = await request.post('/api/dispatch', {
+    data: { command: 'pricing_refresh', args: {}, demo: true },
+  });
+  expect(response.status()).toBe(400);
+  expect((await response.json()).error.category).toBe('pricing_unavailable');
+  await page.screenshot({ path: 'artifacts/pricing-refresh.png', fullPage: true });
+});

@@ -146,6 +146,7 @@ export interface Settings {
   redact_paths: boolean;
   redact_labels: boolean;
   monthly_subscription: number | null;
+  pricing_auto_refresh: boolean;
 }
 export interface Limit {
   provider: string;
@@ -192,6 +193,12 @@ export interface Snapshot {
   budgets: Budget[];
   alerts: Alert[];
   prices: Price[];
+  pricing_refresh: {
+    last_attempt: string | null;
+    last_success: string | null;
+    error: string | null;
+    updated_models: number;
+  };
   settings: Settings;
   limits: Limit[];
   indexed_at: string;
@@ -303,6 +310,7 @@ export interface Commands {
     };
     result: { ok: boolean };
   };
+  pricing_refresh: { args: Record<string, never>; result: { ok: boolean; updated_models: number } };
   pricing_save: {
     args: { model: string; input: number; output: number; cache_read: number; cache_write: number };
     result: { ok: boolean };

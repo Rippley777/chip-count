@@ -286,7 +286,6 @@ Calendar percentage comparisons use the previous calendar period at matching civ
 
 Daily charts include zero-use days with uniform civil-day spacing. Minute charts use actual elapsed instants, distinguish repeated DST minutes, and place zero-use minutes around sparse gaps. Token stacks include uncached input, output (including reasoning), cache reads, and cache writes; reasoning is a subset of output. Cost charts disclose partial coverage and inferred prices. Highest-usage sessions are ranked from the full filtered backend view before pagination.
 
-
 ---
 
 ## 🌗 Looks good after midnight
@@ -367,6 +366,12 @@ Frequently.
 Because apparently stability would be boring.
 
 Chip Count keeps model and pricing metadata separate from the core analytics logic so new models and pricing changes can be incorporated without rewriting the application.
+
+Chip Count downloads the public [Models.dev price catalog](https://models.dev) once every 24 hours while running, including in the menu bar, and catches up when reopened. Failed refreshes keep saved prices and retry after one hour. **Settings → Pricing** lets you disable automatic refresh, refresh immediately, and inspect the last result. Only public pricing metadata is downloaded; no session data or API keys are sent.
+
+The refresh uses complete standard text-token rates for OpenAI and Anthropic, including published context tiers. Models with missing cache rates retain their saved prices or remain unpriced. Local overrides and existing historical estimates keep their recorded rates; use the explicit historical recalculation action to apply new prices to old observations.
+
+For an external cron job that also runs while the desktop app is closed, build `cargo build --release -p chip-server`, then schedule the resulting binary with `--refresh-prices --db /absolute/path/to/chip-count.sqlite`. The command fetches once and exits with a nonzero status on failure. `npm run pricing:refresh -- --db /absolute/path/to/test.sqlite` runs the same operation from a checkout.
 
 Unknown usage is also shown as **unpriced** rather than silently inventing a number.
 

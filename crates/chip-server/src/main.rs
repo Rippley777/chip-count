@@ -34,6 +34,7 @@ struct State {
     demo: Arc<Mutex<LocalIndex>>,
     paused: Arc<AtomicBool>,
     wake: mpsc::SyncSender<()>,
+    pricing: Arc<chip_pricing::PricingUpdater>,
 }
 
 fn data_path() -> Result<PathBuf> {
@@ -41,9 +42,10 @@ fn data_path() -> Result<PathBuf> {
     let mut db = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--refresh-prices" => {}
             "--db" => db = Some(PathBuf::from(args.next().context("--db requires a path")?)),
             "--help" | "-h" => {
-                println!("chip-server [--db PATH]\nDevelopment API at http://{ADDRESS}\nCHIP_COUNT_DATA_DIR overrides the default application data directory.");
+                println!("chip-server [--db PATH] [--refresh-prices]\n--refresh-prices fetches prices once and exits (for cron).\nDevelopment API at http://{ADDRESS}\nCHIP_COUNT_DATA_DIR overrides the default application data directory.");
                 std::process::exit(0);
             }
             _ => bail!("Unknown argument {arg}. Use --help."),
@@ -257,16 +259,32 @@ fn handle(mut request: Request, state: &State) {
     } else {
         &state.real
     };
-    let result = match engine.lock() {
-        Ok(mut engine) => engine
-            .dispatch(&dispatch.command, dispatch.args)
-            .map_err(|e| UserError::from_error(&dispatch.command, &e)),
-        Err(_) => Err(UserError::new(
-            "index_unavailable",
-            "The index worker stopped.",
-            "Restart Chip Count and retry.",
-            "Index mutex was poisoned",
-        )),
+    let result = if dispatch.command == "pricing_refresh" {
+        if dispatch.demo {
+            Err(UserError::new(
+                "pricing_unavailable",
+                "Live pricing refresh is unavailable in demo mode.",
+                "Exit demo mode to refresh API prices.",
+                "demo",
+            ))
+        } else {
+            state
+                .pricing
+                .refresh(engine, true)
+                .map_err(|e| UserError::from_error("pricing_refresh", &e))
+        }
+    } else {
+        match engine.lock() {
+            Ok(mut engine) => engine
+                .dispatch(&dispatch.command, dispatch.args)
+                .map_err(|e| UserError::from_error(&dispatch.command, &e)),
+            Err(_) => Err(UserError::new(
+                "index_unavailable",
+                "The index worker stopped.",
+                "Restart Chip Count and retry.",
+                "Index mutex was poisoned",
+            )),
+        }
     };
     match result {
         Ok(value) => {
@@ -286,6 +304,12 @@ fn handle(mut request: Request, state: &State) {
 
 fn main() -> Result<()> {
     let db = data_path()?;
+    if std::env::args().any(|arg| arg == "--refresh-prices") {
+        let index = Mutex::new(LocalIndex::open(&db, false));
+        let result = chip_pricing::PricingUpdater::default().refresh(&index, true)?;
+        println!("{result}");
+        return Ok(());
+    }
     // Bind before opening the database to avoid two servers indexing the same file.
     let server =
         Server::http(ADDRESS).map_err(|e| anyhow::anyhow!("Could not bind {ADDRESS}: {e}"))?;
@@ -297,7 +321,16 @@ fn main() -> Result<()> {
         demo,
         paused: Arc::new(AtomicBool::new(false)),
         wake,
+        pricing: Arc::new(chip_pricing::PricingUpdater::default()),
     });
+    let pricing_wake = state.wake.clone();
+    state.pricing.clone().start(
+        state.real.clone(),
+        Arc::new(AtomicBool::new(false)),
+        move || {
+            let _ = pricing_wake.try_send(());
+        },
+    )?;
     monitor(state.clone(), receiver);
     println!("Chip Count Rust development API: http://{ADDRESS}");
     println!("Local database: {}", db.display());

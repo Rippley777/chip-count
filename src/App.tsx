@@ -5162,6 +5162,7 @@ function SettingsPage({
 }) {
   const [tab, setTab] = useStored('settings-tab', 'General');
   const [pricing, setPricing] = useState<Price | null>(null);
+  const [refreshingPrices, setRefreshingPrices] = useState(false);
   const [rates, setRates] = useState({
     input: '0',
     output: '0',
@@ -5400,6 +5401,46 @@ function SettingsPage({
             </span>
           </div>
           <section className="panel">
+            <SectionHeading title="Automatic price refresh" />
+            <Toggle
+              label="Refresh API prices daily"
+              description="Fetch the public Models.dev catalog while Chip Count is running. Catch up on launch; retry failed refreshes after an hour."
+              value={settings.pricing_auto_refresh}
+              onChange={(value) => save({ pricing_auto_refresh: value })}
+              disabled={demo}
+            />
+            <p className="small-note">
+              {snapshot.pricing_refresh?.last_success
+                ? `Last refreshed ${date(snapshot.pricing_refresh.last_success)} · ${snapshot.pricing_refresh.updated_models} models changed.`
+                : 'Using saved prices. No successful refresh yet.'}
+              {demo && ' Live price refresh is unavailable in demo mode.'}
+            </p>
+            {snapshot.pricing_refresh?.error && (
+              <p className="small-note" role="status">
+                Refresh failed. Saved prices remain available. {snapshot.pricing_refresh.error}
+              </p>
+            )}
+            <button
+              className="button small"
+              disabled={demo || refreshingPrices}
+              onClick={async () => {
+                setRefreshingPrices(true);
+                try {
+                  await run('pricing_refresh', {}, 'API prices refreshed');
+                } finally {
+                  setRefreshingPrices(false);
+                }
+              }}
+            >
+              <RefreshCw size={13} />
+              {refreshingPrices ? 'Refreshing prices…' : 'Refresh prices now'}
+            </button>
+            <p className="small-note">
+              Only the public price catalog is downloaded. Local overrides and historical estimates
+              keep their recorded rates.
+            </p>
+          </section>
+          <section className="panel">
             <SectionHeading title="Model pricing">
               <Badge>USD per million tokens</Badge>
             </SectionHeading>
@@ -5425,7 +5466,9 @@ function SettingsPage({
                             ? 'Local override'
                             : p.inferred
                               ? 'Auto-review estimate · model inferred'
-                              : 'Bundled snapshot'}{' '}
+                              : p.version.startsWith('models-dev-')
+                                ? 'Fetched catalog'
+                                : 'Bundled snapshot'}{' '}
                           · {p.version} · {date(p.retrieved_at)}
                         </small>
                         <span className="price-source">{p.source}</span>

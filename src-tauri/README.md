@@ -32,6 +32,14 @@ Budget notifications are optional. The persistent core alert history determines 
 
 Production CSP permits bundled resources and Tauri IPC only. The development CSP additionally allows Vite's local HMR connection and inline development refresh bootstrap. Frontend permissions are restricted to index-event subscriptions, focus inspection, and file selection. The frontend has no general filesystem, shell, URL-opening, or notification permission.
 
+## Scheduled API prices
+
+The native `chip-pricing` worker downloads `https://models.dev/api.json` independently of session monitoring. It checks persisted refresh timestamps every minute: refresh after 24 hours since the last success, catch up at startup, and back off one hour after a failed attempt. A 30-second HTTP timeout and 16 MB response limit bound requests; redirects are rejected. HTTP runs outside the accounting mutex. Catalog validation completes before a single atomic database transaction updates current prices and version history. The core remains free of networking.
+
+`pricing_refresh` invokes the same updater immediately; demo mode rejects live requests. `settings_save` accepts the boolean `pricing_auto_refresh` (default true, also for existing workspaces). Snapshots expose `pricing_refresh` with `last_attempt`, `last_success`, `error`, and `updated_models`. Local overrides and previously priced or unpriced events are retained. Long-context prices come from catalog tiers; bundled snapshots keep their existing rules. No changes to frontend CSP or sandbox entitlements are needed; HTTP stays in Rust and App Store builds already have network-client permission.
+
+`chip-server --refresh-prices [--db PATH]` refreshes once without binding a server, then exits. Use it from system cron with the same database path as the desktop app. The normal development server runs the daily worker too.
+
 ## Development API
 
 `cargo run -p chip-server -- --db /absolute/path/index.sqlite` serves `127.0.0.1:4319`. Routes are `GET /api/health`, `POST /api/dispatch`, and `POST /api/monitoring`. Mutations require JSON and all requests validate the loopback Host/Origin and cross-site browser metadata. The API exposes no save-file, reveal, shell, notification, or autostart operation. HTTP request bodies are bounded to 4 MB.
@@ -74,4 +82,4 @@ Sandbox source access:
 
 See [sandbox acceptance and reviewer instructions](../docs/APP_STORE_SANDBOX.md). Unit/browser checks alone do not prove macOS sandbox behavior.
 
-References: [Apple sandbox file access](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox), [read-only bookmark creation](https://developer.apple.com/documentation/foundation/nsurl/bookmarkdata(options:includingresourcevaluesforkeys:relativeto:)?language=objc), [Tauri App Store packaging](https://v2.tauri.app/distribute/app-store/).
+References: [Apple sandbox file access](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox), [read-only bookmark creation](<https://developer.apple.com/documentation/foundation/nsurl/bookmarkdata(options:includingresourcevaluesforkeys:relativeto:)?language=objc>), [Tauri App Store packaging](https://v2.tauri.app/distribute/app-store/).

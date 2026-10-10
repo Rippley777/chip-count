@@ -40,7 +40,8 @@ struct DesktopState {
     real: Arc<Mutex<LocalIndex>>,
     demo: Arc<Mutex<LocalIndex>>,
     paused: Arc<AtomicBool>,
-    stopping: AtomicBool,
+    stopping: Arc<AtomicBool>,
+    pricing: Arc<chip_pricing::PricingUpdater>,
     close_to_tray: Arc<AtomicBool>,
     notifications: Arc<AtomicBool>,
     wake: mpsc::SyncSender<()>,
@@ -68,12 +69,26 @@ async fn dispatch(app: AppHandle, request: Request) -> Result<Value, UserError> 
     let operation = request.command.clone();
     let worker_operation = operation.clone();
     let app_worker = app.clone();
+    let pricing = state.pricing.clone();
     let should_wake = !request.demo
         && !matches!(
             request.command.as_str(),
             "snapshot" | "session" | "compare" | "export"
         );
     let result = tauri::async_runtime::spawn_blocking(move || {
+        if request.command == "pricing_refresh" {
+            if request.demo {
+                return Err(UserError::new(
+                    "pricing_unavailable",
+                    "Live pricing refresh is unavailable in demo mode.",
+                    "Exit demo mode to refresh API prices.",
+                    "demo",
+                ));
+            }
+            return pricing
+                .refresh(&engine, true)
+                .map_err(|e| UserError::from_error("pricing_refresh", &e));
+        }
         let mut engine = engine.lock().map_err(|_| {
             UserError::new(
                 "index_unavailable",
@@ -840,7 +855,8 @@ pub fn run() {
                 access: Mutex::new(access),
                 wake,
                 paused: Arc::new(AtomicBool::new(false)),
-                stopping: AtomicBool::new(false),
+                stopping: Arc::new(AtomicBool::new(false)),
+                pricing: Arc::new(chip_pricing::PricingUpdater::default()),
                 close_to_tray: Arc::new(AtomicBool::new(
                     snapshot["settings"]["close_to_tray"]
                         .as_bool()
@@ -852,6 +868,21 @@ pub fn run() {
                         .unwrap_or(false),
                 )),
             });
+            let state = app.state::<DesktopState>();
+            let pricing_app = app.handle().clone();
+            state
+                .pricing
+                .clone()
+                .start(state.real.clone(), state.stopping.clone(), move || {
+                    let _ = pricing_app.state::<DesktopState>().wake.try_send(());
+                    emit_status(
+                        &pricing_app,
+                        pricing_app
+                            .state::<DesktopState>()
+                            .paused
+                            .load(Ordering::Relaxed),
+                    );
+                })?;
             // Extend Tauri's default menu, retaining native Edit, Window and Services behavior.
             let app_menu = Menu::default(app.handle())?;
             let settings =

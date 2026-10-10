@@ -1,0 +1,36 @@
+{
+  "openai": {
+    "models": {
+      "gpt-6-sol": {
+        "modalities": { "output": ["text"] },
+        "cost": {
+          "input": 3,
+          "output": 12,
+          "cache_read": 0.3,
+          "cache_write": 3.75,
+          "tiers": [
+            {
+              "tier": { "type": "context", "size": 272000 },
+              "input": 7,
+              "output": 21,
+              "cache_read": 0.7,
+              "cache_write": 8.75
+            }
+          ]
+        }
+      },
+      "gpt-incomplete": {
+        "modalities": { "output": ["text"] },
+        "cost": { "input": 1, "output": 2 }
+      }
+    }
+  },
+  "anthropic": {
+    "models": {
+      "claude-sonnet-5-5": {
+        "modalities": { "output": ["text"] },
+        "cost": { "input": 2, "output": 10, "cache_read": 0.1, "cache_write": 2.5 }
+      }
+    }
+  }
+}

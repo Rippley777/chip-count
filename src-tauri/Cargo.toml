@@ -21,6 +21,7 @@ cc = "1"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+chip-pricing = { path = "../crates/chip-pricing" }
 chip-core = { path = "../crates/chip-core" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

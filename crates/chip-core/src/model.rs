@@ -226,6 +226,14 @@ impl Counters {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceTier {
+    pub above_tokens: u64,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Price {
     pub model: String,
     pub input: f64,
@@ -239,6 +247,8 @@ pub struct Price {
     pub overridden: bool,
     #[serde(default)]
     pub inferred: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<PriceTier>,
 }
 pub fn detected_timezone() -> String {
     iana_time_zone::get_timezone()
@@ -247,7 +257,7 @@ pub fn detected_timezone() -> String {
         .unwrap_or_else(|| "UTC".into())
 }
 pub fn settings_default() -> Value {
-    json!({"theme":"dark","density":"comfortable","timezone":detected_timezone(),"inactivity_minutes":10,"close_to_tray":true,"launch_at_login":false,"notifications":false,"retention_days":365,"redact_paths":false,"redact_labels":false,"monthly_subscription":null})
+    json!({"theme":"dark","density":"comfortable","timezone":detected_timezone(),"inactivity_minutes":10,"close_to_tray":true,"launch_at_login":false,"notifications":false,"retention_days":365,"redact_paths":false,"redact_labels":false,"monthly_subscription":null,"pricing_auto_refresh":true})
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Filter {

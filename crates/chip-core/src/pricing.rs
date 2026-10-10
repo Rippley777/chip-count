@@ -89,6 +89,7 @@ impl Engine {
                     }.into(),
                     overridden: false,
                     inferred: model == "codex-auto-review",
+                    tiers: vec![],
                 };
                 self.store_price(&price)?;
                 recover_models.push(model);
@@ -154,6 +155,7 @@ impl Engine {
             retrieved_at: now(),
             overridden: true,
             inferred: required(v, "model")? == "codex-auto-review",
+            tiers: vec![],
         })
     }
     pub(crate) fn apply_price(&self, e: &mut Event) -> Result<()> {
@@ -180,7 +182,20 @@ impl Engine {
             } else {
                 &p.model
             };
-            let long_context = modern_openai(pricing_model)
+            let context_tokens = e
+                .usage
+                .input
+                .saturating_add(e.usage.cache_read)
+                .saturating_add(e.usage.cache_write);
+            let tier = p
+                .tiers
+                .iter()
+                .filter(|t| context_tokens > t.above_tokens)
+                .max_by_key(|t| t.above_tokens);
+            let verified_context_rates = modern_openai(pricing_model) || tier.is_some();
+            let long_context = p.tiers.is_empty()
+                && !p.version.starts_with("models-dev-")
+                && modern_openai(pricing_model)
                 && e.usage
                     .input
                     .saturating_add(e.usage.cache_read)
@@ -190,7 +205,7 @@ impl Engine {
             if e.warnings
                 .iter()
                 .any(|w| w.starts_with("Pricing unavailable:")
-                    && !(modern_openai(pricing_model) && w == "Pricing unavailable: long-context tier requires a verified rate override"))
+                    && !(verified_context_rates && w == "Pricing unavailable: long-context tier requires a verified rate override"))
                 && !p.overridden
             {
                 e.usage.unpriced_tokens = e.usage.total;
@@ -198,7 +213,7 @@ impl Engine {
                 return Ok(());
             }
             e.warnings.retain(|w| w != "Pricing basis: long-context request (>272K input); 2x input/cache and 1.5x output rates");
-            if modern_openai(pricing_model) && !p.overridden {
+            if verified_context_rates && !p.overridden {
                 e.warnings.retain(|w| {
                     w != "Pricing unavailable: long-context tier requires a verified rate override"
                 });
@@ -216,10 +231,27 @@ impl Engine {
             };
             let input_multiplier = if long_context { 2. } else { 1. };
             let output_multiplier = if long_context { 1.5 } else { 1. };
-            let n = calc(e.usage.input, p.input * input_multiplier)
-                + calc(e.usage.output, p.output * output_multiplier)
-                + calc(e.usage.cache_read, p.cache_read * input_multiplier)
-                + calc(e.usage.cache_write, p.cache_write * input_multiplier);
+            e.warnings
+                .retain(|w| !w.starts_with("Pricing basis: catalog context tier"));
+            if let Some(tier) = tier {
+                e.warnings.push(format!(
+                    "Pricing basis: catalog context tier (> {} input tokens)",
+                    tier.above_tokens
+                ));
+            }
+            let n = calc(
+                e.usage.input,
+                tier.map_or(p.input * input_multiplier, |t| t.input),
+            ) + calc(
+                e.usage.output,
+                tier.map_or(p.output * output_multiplier, |t| t.output),
+            ) + calc(
+                e.usage.cache_read,
+                tier.map_or(p.cache_read * input_multiplier, |t| t.cache_read),
+            ) + calc(
+                e.usage.cache_write,
+                tier.map_or(p.cache_write * input_multiplier, |t| t.cache_write),
+            );
             e.usage.nano = ((n + 500_000) / 1_000_000).min(i64::MAX as i128) as i64;
             e.usage.cost = e.usage.nano as f64 / 1e9;
             if p.inferred {
